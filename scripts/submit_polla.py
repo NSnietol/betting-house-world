@@ -46,8 +46,12 @@ def fuzzy_match(a: str, b: str) -> float:
     return len(sa & sb) / len(sa | sb)
 
 
-def fill_page(page, predictions: list[dict]) -> int:
-    """Fill empty prediction fields on the current page."""
+def fill_page(page, predictions: list[dict]) -> tuple[int, list[dict]]:
+    """Fill prediction fields on the current page for matches in the JSON only.
+    
+    Returns:
+        Tuple of (number filled, remaining predictions not found on this page).
+    """
     page_data = page.evaluate("""
         () => {
             const rows = document.querySelectorAll('tr');
@@ -73,6 +77,8 @@ def fill_page(page, predictions: list[dict]) -> int:
     """)
 
     filled = 0
+    remaining = []
+
     for pred in predictions:
         best = None
         best_score = 0.0
@@ -83,6 +89,7 @@ def fill_page(page, predictions: list[dict]) -> int:
                 best = pm
 
         if best is None:
+            remaining.append(pred)
             continue
 
         # Skip already filled
@@ -96,8 +103,10 @@ def fill_page(page, predictions: list[dict]) -> int:
             away_el.fill(str(pred["away"]))
             print(f"    {best['match']}: {pred['home']}-{pred['away']}")
             filled += 1
+        else:
+            remaining.append(pred)
 
-    return filled
+    return filled, remaining
 
 
 def main():
@@ -172,9 +181,10 @@ def main():
         # FILL & SAVE PER PAGE
         total = 0
         current_page = 1
+        remaining = list(predictions)  # Only fill what's in the JSON
 
-        while True:
-            filled = fill_page(page, predictions)
+        while remaining:
+            filled, remaining = fill_page(page, remaining)
             total += filled
 
             if filled > 0:
@@ -183,8 +193,10 @@ def main():
                     save.click()
                     page.wait_for_timeout(3000)
                     print(f"  ✓ Page {current_page}: saved {filled}")
-            else:
-                print(f"  - Page {current_page}: nothing to fill")
+
+            # If no predictions left to match, stop
+            if not remaining:
+                break
 
             current_page += 1
             next_link = page.locator(f"a:text-is('{current_page}')")
