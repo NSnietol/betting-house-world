@@ -1,896 +1,700 @@
-# Design Document: Betting Odds Calculator
+# Design Document
 
 ## Overview
 
-This design describes a single-entry-point Python script that extracts soccer betting odds from The Odds API (v4), removes bookmaker commission via configurable margin elimination methods, reverse-engineers Expected Goals (λ and μ) using scipy optimization against a Poisson model, and outputs the most probable exact score per match in a strictly numeric terminal table.
+This design describes the pluggable adapter architecture that replaces the single-source Odds API approach with a multi-source web scraping extraction layer. The existing math pipeline (MarginEliminator → LambdaOptimizer → ScoreMatrixGenerator → DataQualityAnalyzer → TerminalOutput) remains unchanged.
 
-The script operates as a pure CLI tool with no server component. It caches raw API responses in a local SQLite database to conserve API credits and supports execution by date or by league round.
+The new extraction layer introduces:
+- An abstract `OddsAdapter` base class defining the contract all bookmaker sources implement
+- An `AdapterRegistry` that auto-discovers adapter files at startup
+- HTTP scraping utilities (requests + BeautifulSoup) for server-rendered pages
+- An optional Playwright headless browser fallback for JS-heavy sites
+- Resilience primitives: rate limiting, user-agent rotation, retry with backoff
+- A rewritten `OddsExtractor` that orchestrates adapters instead of calling a single API
 
-### Key Design Decisions
-
-1. **Independent Poisson model**: Goals are modeled as independent Poisson random variables (not bivariate with correlation parameter). This simplifies optimization to two parameters (λ, μ) while remaining standard for market-derived expected goals.
-2. **Shin method as default**: The Shin method accounts for favourite-longshot bias present in bookmaker odds, producing more accurate true probabilities than simple normalization.
-3. **Per-bookmaker processing with aggregation**: Each bookmaker's odds are independently de-vigged, then the median real probability across bookmakers is used for optimization. This reduces noise from any single bookmaker.
-4. **L-BFGS-B optimizer**: Bounded optimization method from scipy that handles the [0.1, 5.0] constraints on λ and μ natively without requiring penalty terms.
+The Odds API remains as one adapter among many (optional, activated by environment variable), rather than the sole data source.
 
 ## Architecture
 
 ```mermaid
-flowchart TD
-    CLI[CLI Entry Point] --> |"--sport, --date/--round"| OE[Odds Extractor]
-    OE --> |Check cache| CS[Cache Store - SQLite]
-    CS --> |Cache hit| OE
-    OE --> |Cache miss| API[The Odds API v4]
-    API --> |Raw JSON| OE
-    OE --> |Store response| CS
-    OE --> |Filtered odds| ME[Margin Eliminator]
-    ME --> |Real probabilities| LO[Lambda Optimizer]
-    LO --> |λ, μ| SMG[Score Matrix Generator]
-    SMG --> |Suggested score| DQ[Data Quality Analyzer]
-    DQ --> |Flags| OUT[Terminal Output]
-    ME --> |Probabilities| DQ
-
-    %% Retro-Feedback Loop
-    CLI --> |"--retro --date"| RF[RetroFeedback Module]
-    RF --> |Fetch scores| API
-    RF --> |Load predictions| CS
-    RF --> |Store actual results| CS
-    RF --> |Accuracy metrics| RFOUT[Retro Output Table]
-
-    %% Bookmaker Reliability
-    RF --> |Per-bookmaker results| BS[BookmakerScorer Module]
-    BS --> |Update scores| CS
-    BS --> |Flag unreliable| OE
-    CLI --> |"--bookmaker-report"| BS
-    BS --> |Reliability table| BSOUT[Bookmaker Report Output]
+graph TD
+    CLI[CLI Entry Point<br/>src/main.py] --> OE[OddsExtractor<br/>Orchestrator]
+    
+    OE --> AR[AdapterRegistry]
+    AR --> |auto-discover| PA[PinnacleAdapter]
+    AR --> |auto-discover| BA[Bet365Adapter]
+    AR --> |auto-discover| WHA[WilliamHillAdapter]
+    AR --> |auto-discover| OA[OddsAPIAdapter<br/>optional]
+    AR --> |auto-discover| MORE[... more adapters]
+    
+    PA --> |declares: HTTP| SC[Scraping Layer]
+    BA --> |declares: HEADLESS| SC
+    WHA --> |declares: HTTP| SC
+    OA --> |declares: API| DIRECT[Direct HTTP GET]
+    
+    SC --> HTTP[HTTPScraper<br/>requests + BS4]
+    SC --> HL[HeadlessScraper<br/>Playwright]
+    SC --> RES[Resilience<br/>RateLimiter + UARotator + Retry]
+    
+    OE --> |aggregated odds| CS[CacheStore<br/>SQLite]
+    OE --> |filtered events| ME[MarginEliminator]
+    ME --> LO[LambdaOptimizer]
+    LO --> SMG[ScoreMatrixGenerator]
+    SMG --> DQ[DataQualityAnalyzer]
+    DQ --> OUT[TerminalOutput]
 ```
 
-### Processing Pipeline
+### Extraction Flow (Sequence)
 
-Each match flows through a sequential pipeline:
-1. **Extraction** → fetch/cache odds from API
-2. **Margin Elimination** → convert raw odds to real probabilities per bookmaker
-3. **Aggregation** → compute median probabilities across bookmakers
-4. **Optimization** → fit λ and μ via scipy.optimize.minimize
-5. **Score Matrix** → generate 6×6 Poisson grid, select max-probability cell
-6. **Quality Flags** → compute variance, margin, and coverage indicators
-7. **Output** → render pipe-delimited table row
+```mermaid
+sequenceDiagram
+    participant CLI as CLI
+    participant OE as OddsExtractor
+    participant AR as AdapterRegistry
+    participant A as Adapter (N)
+    participant R as Resilience
+    participant CS as CacheStore
 
-Matches that fail at any step are skipped (logged to stderr) and omitted from output.
+    CLI->>OE: extract(sport, date)
+    OE->>CS: check cache freshness
+    CS-->>OE: expired / miss
+    OE->>AR: get_healthy_adapters()
+    AR-->>OE: [adapter1, adapter2, ...]
+    loop For each adapter
+        OE->>A: fetch_1x2(sport, date)
+        A->>R: request with rate limit + UA rotation
+        R-->>A: HTML / JSON response
+        A-->>OE: List[ScrapedMatch]
+        OE->>A: fetch_over_under(sport, date)
+        A->>R: request with rate limit + UA rotation
+        R-->>A: HTML / JSON response
+        A-->>OE: List[ScrapedMatch]
+    end
+    OE->>OE: correlate events across adapters
+    OE->>CS: store raw extracted data
+    OE-->>CLI: List[AggregatedEvent]
+```
 
 ## Components and Interfaces
 
-### 1. CLI Module (`main.py`)
-
-Entry point that parses arguments and orchestrates the pipeline.
+### 1. Abstract Base Class — `src/adapters/base.py`
 
 ```python
-def main():
-    """
-    Parse CLI arguments and run the processing pipeline.
-    
-    Arguments:
-        --sport: Required. Sport/league key (e.g., "soccer_epl")
-        --date: Optional. Date in YYYY-MM-DD format
-        --round: Optional. League round identifier
-        --method: Optional. Margin removal method ("shin" | "logarithmic"), default "shin"
-        --ttl: Optional. Cache TTL in hours (1-48), default 24
-        --bookmakers: Optional. Comma-separated bookmaker keys to filter
-    """
-```
+from __future__ import annotations
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from enum import Enum
+from datetime import datetime
 
-### 2. Odds Extractor (`odds_extractor.py`)
 
-Responsible for fetching odds from The Odds API v4 and managing cache interactions.
+class ExtractionMethod(Enum):
+    """Declares how an adapter fetches data."""
+    HTTP = "http"
+    HEADLESS = "headless"
+    API = "api"
 
-```python
-class OddsExtractor:
-    BASE_URL = "https://api.the-odds-api.com/v4"
-    TIMEOUT = 30  # seconds
-    
-    def __init__(self, api_key: str, cache_store: CacheStore, ttl_hours: int = 24):
+
+class AdapterHealth(Enum):
+    """Health status of an adapter."""
+    REACHABLE = "reachable"
+    UNREACHABLE = "unreachable"
+    RATE_LIMITED = "rate_limited"
+    DEGRADED = "degraded"
+
+
+@dataclass
+class MarketOutcome:
+    """A single outcome in a betting market."""
+    name: str           # "Home", "Draw", "Away", "Over", "Under"
+    odds: float         # decimal odds
+    point: float | None = None  # e.g. 2.5 for over/under
+
+
+@dataclass
+class ScrapedMatch:
+    """Standardized match data returned by any adapter."""
+    home_team: str
+    away_team: str
+    event_timestamp: datetime
+    market_type: str         # "1x2" or "over_under"
+    outcomes: list[MarketOutcome] = field(default_factory=list)
+
+
+class OddsAdapter(ABC):
+    """Abstract base class for all bookmaker data extraction adapters."""
+
+    @property
+    @abstractmethod
+    def bookmaker_id(self) -> str:
+        """Unique identifier for this bookmaker (e.g., 'pinnacle')."""
         ...
 
-    def fetch_odds(self, sport: str, markets: list[str], 
-                   bookmakers: list[str] | None = None,
-                   commence_time_from: str | None = None,
-                   commence_time_to: str | None = None) -> list[dict]:
-        """
-        Fetch odds from API or cache. Returns list of event dicts.
-        
-        Raises OddsExtractionError on HTTP errors or timeouts.
-        """
-    
-    def _build_request_params(self, sport: str, markets: list[str],
-                               bookmakers: list[str] | None,
-                               commence_time_from: str | None,
-                               commence_time_to: str | None) -> dict:
-        """Build query parameters for The Odds API v4 GET /odds endpoint."""
-    
-    def _filter_events(self, events: list[dict], 
-                       min_bookmakers: int = 3) -> list[dict]:
-        """
-        Filter events ensuring each has both h2h and totals markets
-        from at least min_bookmakers. Logs warnings for skipped matches.
-        """
-```
-
-### 3. Cache Store (`cache_store.py`)
-
-SQLite-backed cache that stores raw JSON responses.
-
-```python
-class CacheStore:
-    def __init__(self, db_path: str = "odds_cache.db"):
+    @property
+    @abstractmethod
+    def bookmaker_name(self) -> str:
+        """Human-readable name (e.g., 'Pinnacle Sports')."""
         ...
-    
-    def get(self, sport_key: str, market_type: str, 
-            event_id: str, bookmaker_keys: tuple[str, ...]) -> dict | None:
-        """
-        Return cached response if exists and not expired.
-        Returns None if no valid cache entry.
-        """
-    
-    def put(self, sport_key: str, market_type: str, event_id: str,
-            bookmaker_keys: tuple[str, ...], response_json: str,
-            retrieved_at: datetime) -> None:
-        """Store raw JSON response with metadata."""
-    
-    def is_expired(self, retrieved_at: datetime, ttl_hours: int) -> bool:
-        """Check if cached entry exceeds TTL threshold."""
-```
 
-**SQLite Schema:**
+    @property
+    @abstractmethod
+    def priority(self) -> int:
+        """Priority level. Lower number = higher priority."""
+        ...
 
-```sql
-CREATE TABLE IF NOT EXISTS cache (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    sport_key TEXT NOT NULL,
-    market_type TEXT NOT NULL,
-    event_id TEXT NOT NULL,
-    bookmaker_keys TEXT NOT NULL,  -- JSON array of sorted bookmaker keys
-    response_json TEXT NOT NULL,
-    retrieved_at TEXT NOT NULL,    -- ISO 8601 UTC timestamp
-    UNIQUE(sport_key, market_type, event_id, bookmaker_keys)
-);
+    @property
+    @abstractmethod
+    def extraction_method(self) -> ExtractionMethod:
+        """Declares whether this adapter uses HTTP, headless, or API."""
+        ...
 
-CREATE INDEX idx_cache_lookup 
-ON cache(sport_key, market_type, event_id, bookmaker_keys);
-```
+    @property
+    @abstractmethod
+    def base_url(self) -> str:
+        """Root URL for the bookmaker site."""
+        ...
 
-### 4. Margin Eliminator (`margin_eliminator.py`)
+    @abstractmethod
+    def fetch_1x2(self, sport: str, date: str | None = None) -> list[ScrapedMatch]:
+        """Fetch 1X2 (match winner) odds.
 
-Removes bookmaker overround to produce real probabilities.
-
-```python
-class MarginEliminator:
-    def __init__(self, method: str = "shin"):
-        """method: 'shin' or 'logarithmic'"""
-    
-    def eliminate(self, decimal_odds: tuple[float, float, float]) -> tuple[float, float, float]:
-        """
-        Convert 1X2 decimal odds to real probabilities.
-        
         Args:
-            decimal_odds: (home_odd, draw_odd, away_odd)
-        
+            sport: Sport/league key (e.g., 'soccer_epl').
+            date: Optional YYYY-MM-DD date filter.
+
         Returns:
-            (p_home, p_draw, p_away) summing to 1.0 (±0.001)
-        
+            List of ScrapedMatch with market_type='1x2'.
+
         Raises:
-            AnomalousOddsError if implied probabilities sum <= 1.0
+            OddsExtractionError: On unrecoverable extraction failure.
         """
-    
-    def _shin_method(self, implied_probs: tuple[float, float, float]) -> tuple[float, float, float]:
-        """
-        Shin's method: solve for z (proportion of insider trading)
-        then compute true probabilities accounting for favourite-longshot bias.
-        
-        For n outcomes with implied probabilities p_i summing to S:
-        z = (S - 1) / (S - 1 + n)  [simplified 3-outcome approximation]
-        true_p_i = (sqrt(z² + 4*(1-z) * p_i² / S) - z) / (2*(1-z))
-        """
-    
-    def _logarithmic_method(self, implied_probs: tuple[float, float, float]) -> tuple[float, float, float]:
-        """
-        Logarithmic normalization: distribute overround proportionally.
-        
-        true_p_i = (p_i ^ k) / sum(p_j ^ k)
-        where k is found such that sum equals 1.0.
-        Equivalent to normalizing in log-odds space.
-        """
-```
-
-### 5. Lambda Optimizer (`lambda_optimizer.py`)
-
-Fits expected goals parameters using scipy optimization.
-
-```python
-class LambdaOptimizer:
-    INITIAL_GUESS = (1.5, 1.2)
-    BOUNDS = ((0.1, 5.0), (0.1, 5.0))
-    CONVERGENCE_THRESHOLD = 1e-6
-    
-    def optimize(self, real_probs_1x2: tuple[float, float, float],
-                 real_prob_over_2_5: float) -> tuple[float, float] | None:
-        """
-        Find λ (home xG) and μ (away xG) that minimize the sum of squared
-        differences between Poisson-predicted and real probabilities.
-        
-        Objective function:
-            f(λ, μ) = (P_home_poisson - p_home)²
-                     + (P_draw_poisson - p_draw)²
-                     + (P_away_poisson - p_away)²
-                     + (P_over_2.5_poisson - p_over)²
-        
-        Returns (λ, μ) rounded to 4 decimal places, or None on failure.
-        """
-    
-    def _poisson_1x2(self, lam: float, mu: float, 
-                     max_goals: int = 10) -> tuple[float, float, float]:
-        """
-        Calculate P(home win), P(draw), P(away win) from independent
-        Poisson distributions with parameters λ and μ.
-        
-        Sums over i,j from 0 to max_goals:
-        - P(home) = sum of P(X=i)*P(Y=j) where i > j
-        - P(draw) = sum of P(X=i)*P(Y=j) where i == j
-        - P(away) = sum of P(X=i)*P(Y=j) where i < j
-        """
-    
-    def _poisson_over_2_5(self, lam: float, mu: float, 
-                          max_goals: int = 10) -> float:
-        """
-        Calculate P(total goals > 2.5) from independent Poisson.
-        
-        P(over 2.5) = 1 - sum of P(X=i)*P(Y=j) where i+j <= 2
-        """
-```
-
-### 6. Score Matrix Generator (`score_matrix.py`)
-
-Generates probability grid and selects most probable exact score.
-
-```python
-class ScoreMatrixGenerator:
-    MAX_GOALS = 5  # 0 to 5 inclusive → 6x6 grid
-    
-    def generate(self, lam: float, mu: float) -> dict:
-        """
-        Returns:
-            {
-                "matrix": list[list[float]],  # 6x6 probability grid
-                "suggested_score": (int, int),  # (home_goals, away_goals)
-                "score_probability": float      # probability as fraction
-            }
-        """
-    
-    def _select_max_cell(self, matrix: list[list[float]]) -> tuple[int, int]:
-        """
-        Select cell with highest probability.
-        Tiebreaker 1: lowest total goals (home + away).
-        Tiebreaker 2: fewer home goals.
-        """
-```
-
-### 7. Data Quality Analyzer (`data_quality.py`)
-
-Computes quality flags for each match.
-
-```python
-class DataQualityAnalyzer:
-    VARIANCE_THRESHOLD = 0.03
-    HIGH_MARGIN_THRESHOLD = 0.10
-    LOW_COVERAGE_THRESHOLD = 3
-    
-    def analyze(self, match_odds: dict) -> dict:
-        """
-        Returns:
-            {
-                "variance_flag": float,    # max std dev across 1X2 outcomes, 0.00 if below threshold
-                "high_margin": float,      # max overround across bookmakers, 0.00 if below threshold
-                "low_coverage": int        # number of bookmakers, 0 if >= threshold
-            }
-        """
-    
-    def _compute_std_dev(self, bookmaker_probs: list[tuple[float, float, float]]) -> float:
-        """Compute max standard deviation across home/draw/away implied probs."""
-    
-    def _compute_overround(self, decimal_odds: tuple[float, float, float]) -> float:
-        """Compute overround as sum of implied probabilities minus 1.0."""
-```
-
-### 8. Terminal Output (`output.py`)
-
-Renders the pipe-delimited results table.
-
-```python
-class TerminalOutput:
-    COLUMNS = [
-        "Match", "Real Home Prob %", "Real Draw Prob %", "Real Away Prob %",
-        "xG Home (λ)", "xG Away (μ)", "Suggested Score", "Score Prob %",
-        "Variance Flag", "High Margin", "Low Coverage"
-    ]
-    
-    def render(self, results: list[dict]) -> str:
-        """
-        Produce pipe-delimited table string with header and data rows.
-        All values strictly numeric (no text labels).
-        Flag columns show 0.00 or empty when not triggered.
-        """
-```
-
-### 9. RetroFeedback Module (`retro_feedback.py`)
-
-Fetches actual match scores after matchday, compares against stored predictions, and computes accuracy metrics.
-
-```python
-class RetroFeedback:
-    def __init__(self, api_key: str, cache_store: CacheStore):
         ...
 
-    def run(self, date: str) -> RetroReport:
-        """
-        Execute retro-feedback for a given date.
-        
-        1. Load predictions stored for that date from SQLite
-        2. Fetch actual scores from The Odds API scores endpoint
-        3. Store actual results in actual_results table
-        4. Compute per-match accuracy metrics
-        5. Compute aggregate metrics
-        
-        Returns RetroReport with per-match and aggregate data.
-        """
+    @abstractmethod
+    def fetch_over_under(self, sport: str, date: str | None = None) -> list[ScrapedMatch]:
+        """Fetch Over/Under 2.5 goals odds.
 
-    def fetch_actual_scores(self, sport: str, date: str) -> list[dict]:
-        """
-        Fetch completed match scores from The Odds API scores endpoint.
-        
-        Raises OddsExtractionError on HTTP errors or timeouts.
-        """
+        Args:
+            sport: Sport/league key (e.g., 'soccer_epl').
+            date: Optional YYYY-MM-DD date filter.
 
-    def compare_prediction(self, prediction: dict, actual: dict) -> MatchComparison:
-        """
-        Compare a single prediction against actual result.
-        
         Returns:
-            MatchComparison with:
-                - x1x2_correct: bool (predicted outcome matches actual)
-                - score_correct: bool (exact score matches)
-                - lambda_error: float (|predicted_lambda - actual_home_goals|)
-                - mu_error: float (|predicted_mu - actual_away_goals|)
+            List of ScrapedMatch with market_type='over_under'.
+
+        Raises:
+            OddsExtractionError: On unrecoverable extraction failure.
         """
-
-    def compute_aggregates(self, comparisons: list[MatchComparison]) -> AggregateMetrics:
-        """
-        Compute aggregate accuracy metrics across all comparisons.
-        
-        Returns:
-            AggregateMetrics with:
-                - x1x2_hit_rate: float (percentage)
-                - score_hit_rate: float (percentage)
-                - mean_lambda_error: float
-                - mean_mu_error: float
-        """
-
-    def render_retro_table(self, comparisons: list[MatchComparison], 
-                           aggregates: AggregateMetrics) -> str:
-        """
-        Render pipe-delimited retro-feedback table.
-        Columns: Match | Predicted Score | Actual Score | 1X2 Correct | 
-                 Score Correct | λ Error | μ Error | Bookmaker Source
-        
-        Appends aggregate row at bottom.
-        All values strictly numeric.
-        """
-```
-
-### 10. BookmakerScorer Module (`bookmaker_scorer.py`)
-
-Maintains per-bookmaker reliability scores over time, flags unreliable bookmakers, and provides reporting.
-
-```python
-class BookmakerScorer:
-    DEFAULT_THRESHOLD = 0.30
-
-    def __init__(self, cache_store: CacheStore, threshold: float = 0.30):
         ...
 
-    def update_scores(self, comparisons: list[MatchComparison]) -> None:
-        """
-        Update bookmaker_scores table with results from a retro-feedback run.
-        
-        For each bookmaker referenced in comparisons:
-        - Increment total_matches
-        - Increment correct_1x2 if prediction was correct
-        - Update running mean for lambda_error and mu_error
-        """
+    @abstractmethod
+    def health_check(self) -> AdapterHealth:
+        """Report current adapter health (reachable, rate-limited, etc.)."""
+        ...
+```
 
-    def compute_reliability_score(self, stats: BookmakerStats) -> float:
-        """
-        Compute reliability score using weighted formula:
-        score = 0.5 * hit_rate + 0.25 * (1 - norm_lambda_err) + 0.25 * (1 - norm_mu_err)
-        
-        Where normalized errors are scaled to [0, 1] relative to the 
-        worst-performing bookmaker in the current dataset.
-        
-        Returns float in [0.0, 1.0].
-        """
+### 2. Adapter Registry — `src/adapters/registry.py`
 
-    def flag_unreliable(self) -> list[str]:
-        """
-        Check all bookmakers against threshold.
-        Flag those with reliability_score < threshold as unreliable.
-        Returns list of newly flagged bookmaker keys.
-        """
+```python
+from __future__ import annotations
+import importlib
+import pkgutil
+from pathlib import Path
 
-    def get_excluded_bookmakers(self) -> list[str]:
-        """
-        Return list of bookmaker keys currently flagged as unreliable.
-        These should be excluded from odds processing.
-        """
+from src.adapters.base import OddsAdapter, AdapterHealth
 
-    def enable_bookmaker(self, bookmaker_key: str) -> bool:
-        """
-        Manually re-enable a flagged bookmaker.
-        Returns True if bookmaker was found and re-enabled, False otherwise.
-        """
 
-    def render_report(self) -> str:
+class AdapterRegistry:
+    """Auto-discovers and manages OddsAdapter implementations."""
+
+    def __init__(self) -> None:
+        self._adapters: dict[str, OddsAdapter] = {}
+        self._consecutive_failures: dict[str, int] = {}
+
+    def discover(self) -> None:
+        """Scan the adapters package and instantiate all OddsAdapter subclasses."""
+        ...
+
+    def get_all(self) -> list[OddsAdapter]:
+        """Return all registered adapters sorted by priority (ascending)."""
+        ...
+
+    def get_healthy(self) -> list[OddsAdapter]:
+        """Return only adapters with health == REACHABLE, sorted by priority."""
+        ...
+
+    def list_with_status(self) -> list[dict[str, str]]:
+        """Return adapter info dicts with id, name, health status."""
+        ...
+
+    def record_failure(self, adapter_id: str) -> None:
+        """Increment consecutive failure count. Mark DEGRADED at 3."""
+        ...
+
+    def record_success(self, adapter_id: str) -> None:
+        """Reset consecutive failure count for the adapter."""
+        ...
+```
+
+### 3. HTTP Scraper — `src/scraping/http_scraper.py`
+
+```python
+from __future__ import annotations
+from bs4 import BeautifulSoup
+
+
+class HTTPScraper:
+    """HTTP-based extraction using requests + BeautifulSoup."""
+
+    def __init__(self, resilience: ResilienceConfig) -> None:
+        """Initialize with resilience configuration (rate limiter, UA pool)."""
+        ...
+
+    def fetch_page(self, url: str, domain: str) -> BeautifulSoup:
+        """Fetch a URL respecting rate limits and UA rotation.
+
+        Args:
+            url: Full URL to fetch.
+            domain: Domain key for rate limiting.
+
+        Returns:
+            Parsed BeautifulSoup document.
+
+        Raises:
+            OddsExtractionError: On timeout, HTTP error after retries.
         """
-        Render pipe-delimited bookmaker reliability report.
-        Columns: Bookmaker | Matches | 1X2 Hit Rate % | Mean λ Error | 
-                 Mean μ Error | Reliability Score | Status
-        
-        All values strictly numeric. Status: 1 = active, 0 = excluded.
+        ...
+
+    def extract_by_css(self, soup: BeautifulSoup, selectors: dict[str, str]) -> list[dict]:
+        """Extract elements using CSS selectors.
+
+        Args:
+            soup: Parsed HTML document.
+            selectors: Mapping of field names to CSS selectors.
+
+        Returns:
+            List of extracted value dicts.
         """
+        ...
+
+    def extract_by_xpath(self, soup: BeautifulSoup, expressions: dict[str, str]) -> list[dict]:
+        """Extract elements using XPath expressions (via lxml).
+
+        Args:
+            soup: Parsed HTML document.
+            expressions: Mapping of field names to XPath expressions.
+
+        Returns:
+            List of extracted value dicts.
+        """
+        ...
+
+    @staticmethod
+    def parse_odds_value(raw: str) -> float:
+        """Parse a raw odds string into decimal format.
+
+        Handles decimal ('2.50'), fractional ('3/2'), and American ('+150', '-200').
+
+        Args:
+            raw: Raw odds text from the page.
+
+        Returns:
+            Decimal odds as float.
+
+        Raises:
+            ValueError: If the format is unrecognizable.
+        """
+        ...
+```
+
+### 4. Headless Browser Scraper — `src/scraping/headless.py`
+
+```python
+from __future__ import annotations
+
+
+class HeadlessScraper:
+    """Playwright-based headless browser extraction (optional dependency)."""
+
+    def __init__(self, timeout: int = 60_000) -> None:
+        """Initialize. Raises ImportError if playwright is not installed."""
+        ...
+
+    def fetch_rendered_page(self, url: str, wait_selector: str) -> str:
+        """Load a page, wait for selector, return rendered HTML.
+
+        Args:
+            url: Page URL to load.
+            wait_selector: CSS selector to wait for before extracting.
+
+        Returns:
+            Rendered HTML string.
+
+        Raises:
+            OddsExtractionError: On timeout or page load failure.
+        """
+        ...
+
+    def close(self) -> None:
+        """Close the shared browser instance."""
+        ...
+```
+
+### 5. Resilience Layer — `src/scraping/resilience.py`
+
+```python
+from __future__ import annotations
+import time
+import random
+from dataclasses import dataclass, field
+
+
+@dataclass
+class RateLimiterConfig:
+    """Per-domain rate limiting configuration."""
+    min_delay: float = 3.0       # seconds between requests
+    max_delay: float = 30.0      # upper bound
+    jitter_pct: float = 0.30     # ±30% randomization
+
+
+@dataclass
+class ResilienceConfig:
+    """Full resilience configuration for the scraping layer."""
+    rate_limiter: RateLimiterConfig = field(default_factory=RateLimiterConfig)
+    max_retries: int = 3
+    backoff_base: float = 2.0       # exponential backoff: 2, 4, 8 seconds
+    ua_pool_size: int = 10
+    proxy: str | None = None        # from env SCRAPER_PROXY
+
+
+class RateLimiter:
+    """Token-bucket style per-domain rate limiter with jitter."""
+
+    def __init__(self, config: RateLimiterConfig) -> None:
+        self._config = config
+        self._last_request: dict[str, float] = {}
+
+    def wait(self, domain: str) -> None:
+        """Block until the domain's rate limit window has passed."""
+        ...
+
+    def _compute_delay(self) -> float:
+        """Compute delay with jitter applied."""
+        base = self._config.min_delay
+        jitter = base * self._config.jitter_pct * random.uniform(-1, 1)
+        return max(0.1, base + jitter)
+
+
+class UserAgentRotator:
+    """Cycles through realistic browser user-agent strings."""
+
+    _AGENTS: list[str] = [...]  # 10+ realistic UA strings
+
+    def __init__(self) -> None:
+        self._index = 0
+
+    def next(self) -> str:
+        """Return the next user-agent string in rotation."""
+        ...
+
+
+class RetryHandler:
+    """Exponential backoff retry logic for transient failures."""
+
+    def __init__(self, max_retries: int = 3, backoff_base: float = 2.0) -> None:
+        self._max_retries = max_retries
+        self._backoff_base = backoff_base
+
+    def execute(self, fn, *args, **kwargs):
+        """Execute fn with retry on transient errors (5xx, timeout, reset).
+
+        Retries up to max_retries times with exponential backoff.
+        Respects Retry-After header on HTTP 429.
+
+        Returns:
+            Result of fn on success.
+
+        Raises:
+            OddsExtractionError: After all retries exhausted.
+        """
+        ...
+```
+
+### 6. Rewritten OddsExtractor — `src/odds_extractor.py`
+
+```python
+from __future__ import annotations
+from src.adapters.registry import AdapterRegistry
+from src.adapters.base import ScrapedMatch
+from src.cache_store import CacheStore
+
+
+class OddsExtractor:
+    """Orchestrates adapter-based extraction, event correlation, and caching."""
+
+    MIN_BOOKMAKERS = 3
+
+    def __init__(
+        self,
+        registry: AdapterRegistry,
+        cache_store: CacheStore,
+        ttl_hours: int = 24,
+        excluded_bookmakers: list[str] | None = None,
+    ) -> None:
+        ...
+
+    def extract(
+        self,
+        sport: str,
+        date: str | None = None,
+        round_id: str | None = None,
+    ) -> list[AggregatedEvent]:
+        """Run full extraction across all healthy adapters.
+
+        1. Check cache freshness
+        2. Query each adapter for 1X2 and over/under markets
+        3. Correlate events across adapters
+        4. Enforce minimum bookmaker threshold
+        5. Cache raw results
+        6. Return aggregated events
+        """
+        ...
+
+    def _correlate_events(
+        self,
+        all_matches: dict[str, list[ScrapedMatch]],
+    ) -> list[AggregatedEvent]:
+        """Match events across adapters using team name normalization + ±2h timestamp."""
+        ...
+
+    @staticmethod
+    def normalize_team_name(name: str) -> str:
+        """Normalize team name: lowercase, strip FC/CF/SC suffixes, strip whitespace."""
+        ...
 ```
 
 ## Data Models
 
-### API Response Model (from The Odds API v4)
+### New Adapter-Layer Models (additions to `src/models.py`)
 
 ```python
+from __future__ import annotations
+from dataclasses import dataclass, field
+from datetime import datetime
+
+
 @dataclass
-class OddsEvent:
-    id: str
-    sport_key: str
-    commence_time: str  # ISO 8601
+class AggregatedEvent:
+    """A single match with odds aggregated from multiple bookmaker adapters."""
     home_team: str
     away_team: str
-    bookmakers: list[BookmakerOdds]
+    event_timestamp: datetime
+    bookmaker_odds_1x2: dict[str, tuple[float, float, float]]
+    # bookmaker_id -> (home_odds, draw_odds, away_odds)
+    bookmaker_odds_over_under: dict[str, tuple[float, float]]
+    # bookmaker_id -> (over_2.5_odds, under_2.5_odds)
+    source_count: int  # number of distinct bookmaker sources
+
 
 @dataclass
-class BookmakerOdds:
-    key: str
-    title: str
-    last_update: str
-    markets: list[Market]
-
-@dataclass
-class Market:
-    key: str  # "h2h" or "totals"
-    outcomes: list[Outcome]
-
-@dataclass
-class Outcome:
-    name: str
-    price: float  # decimal odds
-    point: float | None = None  # for totals (2.5)
+class AdapterStatus:
+    """Status snapshot of a registered adapter."""
+    adapter_id: str
+    adapter_name: str
+    priority: int
+    health: str  # "reachable" | "unreachable" | "rate_limited" | "degraded"
+    extraction_method: str  # "http" | "headless" | "api"
+    consecutive_failures: int
 ```
 
-### Internal Processing Models
+### SQLite Schema Update
 
-```python
-@dataclass
-class MatchResult:
-    home_team: str
-    away_team: str
-    real_probs: tuple[float, float, float]  # (home, draw, away)
-    lambda_home: float
-    mu_away: float
-    suggested_score: tuple[int, int]
-    score_probability: float
-    variance_flag: float
-    high_margin: float
-    low_coverage: int
-
-@dataclass
-class CacheEntry:
-    sport_key: str
-    market_type: str
-    event_id: str
-    bookmaker_keys: str  # JSON array string
-    response_json: str
-    retrieved_at: str  # ISO 8601 UTC
-```
-
-### Configuration Model
-
-```python
-@dataclass
-class Config:
-    api_key: str               # from environment variable ODDS_API_KEY
-    sport: str                 # e.g., "soccer_epl"
-    date: str | None           # YYYY-MM-DD or None
-    round_id: str | None       # round identifier or None
-    method: str                # "shin" or "logarithmic"
-    ttl_hours: int             # 1-48, default 24
-    bookmakers: list[str] | None  # filter list or None for API default
-    db_path: str               # SQLite file path, default "odds_cache.db"
-    retro_mode: bool           # True if --retro flag is set
-    bookmaker_report: bool     # True if --bookmaker-report flag is set
-    enable_bookmaker: str | None  # bookmaker key to re-enable, or None
-    reliability_threshold: float  # default 0.30
-```
-
-### RetroFeedback Models
-
-```python
-@dataclass
-class MatchComparison:
-    home_team: str
-    away_team: str
-    predicted_score: tuple[int, int]
-    actual_score: tuple[int, int]
-    predicted_lambda: float
-    predicted_mu: float
-    x1x2_correct: bool       # 1X2 outcome matches
-    score_correct: bool       # exact score matches
-    lambda_error: float       # |predicted_lambda - actual_home_goals|
-    mu_error: float           # |predicted_mu - actual_away_goals|
-    bookmaker_source: str     # bookmaker key used for this prediction
-
-@dataclass
-class AggregateMetrics:
-    x1x2_hit_rate: float      # percentage (0-100)
-    score_hit_rate: float     # percentage (0-100)
-    mean_lambda_error: float
-    mean_mu_error: float
-
-@dataclass
-class BookmakerStats:
-    bookmaker_key: str
-    total_matches: int
-    correct_1x2: int
-    mean_lambda_error: float
-    mean_mu_error: float
-    reliability_score: float
-    is_active: bool           # False if flagged as unreliable
-```
-
-### RetroFeedback SQLite Schema
+The existing `cache` table schema remains compatible. An additional `extraction_method` column is added to track how data was obtained:
 
 ```sql
-CREATE TABLE IF NOT EXISTS predictions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    sport_key TEXT NOT NULL,
-    event_id TEXT NOT NULL,
-    home_team TEXT NOT NULL,
-    away_team TEXT NOT NULL,
-    predicted_home_goals INTEGER NOT NULL,
-    predicted_away_goals INTEGER NOT NULL,
-    lambda_home REAL NOT NULL,
-    mu_away REAL NOT NULL,
-    bookmaker_source TEXT NOT NULL,
-    prediction_date TEXT NOT NULL,     -- YYYY-MM-DD
-    created_at TEXT NOT NULL,          -- ISO 8601 UTC timestamp
-    UNIQUE(sport_key, event_id, bookmaker_source)
-);
-
-CREATE INDEX idx_predictions_date 
-ON predictions(sport_key, prediction_date);
-
-CREATE TABLE IF NOT EXISTS actual_results (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    sport_key TEXT NOT NULL,
-    event_id TEXT NOT NULL,
-    home_team TEXT NOT NULL,
-    away_team TEXT NOT NULL,
-    home_goals INTEGER NOT NULL,
-    away_goals INTEGER NOT NULL,
-    match_date TEXT NOT NULL,          -- YYYY-MM-DD
-    retrieved_at TEXT NOT NULL,        -- ISO 8601 UTC timestamp
-    UNIQUE(sport_key, event_id)
-);
-
-CREATE INDEX idx_actual_results_date 
-ON actual_results(sport_key, match_date);
-
-CREATE TABLE IF NOT EXISTS bookmaker_scores (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    bookmaker_key TEXT NOT NULL UNIQUE,
-    total_matches INTEGER NOT NULL DEFAULT 0,
-    correct_1x2 INTEGER NOT NULL DEFAULT 0,
-    sum_lambda_error REAL NOT NULL DEFAULT 0.0,
-    sum_mu_error REAL NOT NULL DEFAULT 0.0,
-    reliability_score REAL NOT NULL DEFAULT 1.0,
-    is_active INTEGER NOT NULL DEFAULT 1,  -- 1 = active, 0 = excluded
-    last_updated TEXT NOT NULL             -- ISO 8601 UTC timestamp
-);
-
-CREATE INDEX idx_bookmaker_scores_active 
-ON bookmaker_scores(is_active);
+ALTER TABLE cache ADD COLUMN extraction_method TEXT DEFAULT 'api';
+-- Values: 'scraping_http', 'scraping_headless', 'api'
 ```
 
+No other schema changes required. The existing `bookmaker_scores`, `predictions`, and `actual_results` tables work unchanged with the new adapter layer.
+
+### Team Name Normalization Rules
+
+| Rule | Example Input | Normalized |
+|------|--------------|-----------|
+| Lowercase | "Manchester United" | "manchester united" |
+| Strip FC/CF/SC/AFC suffix | "Chelsea FC" | "chelsea" |
+| Strip leading "FC " | "FC Barcelona" | "barcelona" |
+| Collapse whitespace | "Real  Madrid" | "real madrid" |
+| Strip accents (optional) | "Atlético" | "atletico" |
 
 ## Correctness Properties
 
 *A property is a characteristic or behavior that should hold true across all valid executions of a system — essentially, a formal statement about what the system should do. Properties serve as the bridge between human-readable specifications and machine-verifiable correctness guarantees.*
 
-### Property 1: Cache Store Round-Trip
+### Property 1: Auto-Discovery Completeness
 
-*For any* valid JSON response string and associated metadata (sport key, market type, event ID, bookmaker keys), storing it in the Cache Store and then retrieving it with the same lookup keys SHALL return an identical JSON string.
+*For any* set of Python modules in the adapters directory that contain a class inheriting from `OddsAdapter`, the `AdapterRegistry.discover()` method SHALL register every such class, and the count of registered adapters SHALL equal the count of conforming modules.
 
-**Validates: Requirements 1.7, 2.1, 2.3**
+**Validates: Requirements 1.2, 1.3**
 
-### Property 2: Cache TTL Invalidation
+### Property 2: Adapter Fault Isolation
 
-*For any* cache entry with a known `retrieved_at` timestamp and *for any* TTL value between 1 and 48 hours, the entry SHALL be considered expired if and only if the current time minus `retrieved_at` exceeds the configured TTL.
+*For any* set of registered adapters where a subset raises exceptions during extraction, the `OddsExtractor` SHALL return aggregated results from exactly the non-failing adapters, and no exception from one adapter SHALL prevent data from other adapters from being included.
 
-**Validates: Requirements 2.4**
+**Validates: Requirements 1.6, 7.1**
 
-### Property 3: Cache Hit Prevents API Call
+### Property 3: Odds Format Conversion Round-Trip
 
-*For any* request whose parameters (sport key, market type, event ID, bookmaker keys) match a non-expired cache entry, the system SHALL return the cached data without making an HTTP request to The Odds API.
+*For any* valid decimal odds value `d`, converting `d` to fractional format and parsing it back SHALL produce a value within ±0.01 of `d`. Similarly, *for any* valid decimal odds value `d`, converting `d` to American format and parsing it back SHALL produce a value within ±0.01 of `d`.
 
-**Validates: Requirements 2.2**
+**Validates: Requirements 3.7**
 
-### Property 4: Margin Elimination Sum-to-One Invariant
+### Property 4: HTML Extraction Correctness
 
-*For any* set of three decimal odds (home, draw, away) where the sum of their reciprocals exceeds 1.0, applying the Margin Eliminator SHALL produce three real probabilities that sum to 1.0 within a tolerance of ±0.001.
+*For any* well-formed HTML document containing odds values at known CSS selector paths, the `HTTPScraper.extract_by_css()` method SHALL extract values that, when parsed, equal the embedded decimal odds values (within floating-point tolerance ±0.001).
 
-**Validates: Requirements 3.2, 3.3**
+**Validates: Requirements 3.3, 3.4, 3.6**
 
-### Property 5: Margin Elimination Output Range
+### Property 5: HTTP Error Surfaces Correctly
 
-*For any* set of valid decimal odds with overround > 0, each individual real probability produced by the Margin Eliminator SHALL be within the range [0.0, 1.0] inclusive.
-
-**Validates: Requirements 3.6**
-
-### Property 6: Anomalous Odds Exclusion
-
-*For any* set of three decimal odds where the sum of their reciprocals (implied probabilities) is less than or equal to 1.0, the Margin Eliminator SHALL reject those odds and exclude the bookmaker from processing.
+*For any* HTTP response with status code in [400, 599] or a connection timeout, the `HTTPScraper.fetch_page()` SHALL raise an `OddsExtractionError` containing the status code (or "timeout" indication), and the adapter SHALL be marked as temporarily unavailable.
 
 **Validates: Requirements 3.5**
 
-### Property 7: Optimization Round-Trip
+### Property 6: Rate Limiter Timing Invariant
 
-*For any* λ in [0.1, 5.0] and μ in [0.1, 5.0], computing the Poisson-predicted 1X2 probabilities and Over 2.5 probability from those parameters, then running the Lambda Optimizer on those probabilities, SHALL recover λ and μ within a tolerance of 0.05.
+*For any* sequence of N requests (N ≥ 2) to the same domain with a configured minimum delay `d`, the elapsed time between any two consecutive requests SHALL be within the range `[d * 0.7, d * 1.3]` (accounting for jitter), and SHALL never be less than `d * 0.7`.
 
-**Validates: Requirements 4.1, 4.2**
+**Validates: Requirements 5.1, 5.5**
 
-### Property 8: Optimization Bounds Constraint
+### Property 7: User-Agent Rotation Coverage
 
-*For any* set of valid real probabilities provided to the Lambda Optimizer, if optimization succeeds, the returned λ and μ SHALL both be within the range [0.1, 5.0].
+*For any* sequence of K requests where K equals the UA pool size, the set of user-agent strings used SHALL contain all pool entries exactly once (full rotation within one cycle).
 
-**Validates: Requirements 4.6**
+**Validates: Requirements 5.2**
 
-### Property 9: Score Matrix Structure and Correctness
+### Property 8: Retry Exponential Backoff
 
-*For any* λ in (0, 5.0] and μ in (0, 5.0], the Score Matrix Generator SHALL produce a 6×6 matrix where each cell (i, j) equals `poisson_pmf(i, λ) × poisson_pmf(j, μ)` within floating-point tolerance.
+*For any* transient error (HTTP 5xx, connection timeout, connection reset), the system SHALL retry at most 3 times, and the wait duration before retry attempt `i` (1-indexed) SHALL be `2^i` seconds (±30% jitter). After 3 failed retries, the adapter SHALL be marked temporarily unavailable.
 
-**Validates: Requirements 5.1, 5.2**
+**Validates: Requirements 5.4**
 
-### Property 10: Score Matrix Argmax with Tiebreaker
+### Property 9: Degradation After Consecutive Failures
 
-*For any* 6×6 probability matrix, the selected suggested score SHALL be the cell with the maximum probability. If multiple cells share the maximum, the selected cell SHALL have the lowest total goals (i+j), and if still tied, the fewer home goals (i).
+*For any* adapter, recording exactly 3 consecutive failures (without an intervening success) SHALL transition its health status to DEGRADED. Recording a success at any point SHALL reset the consecutive failure counter to 0.
 
-**Validates: Requirements 5.3, 5.4**
+**Validates: Requirements 5.6**
 
-### Property 11: Output Contains Only Numeric Values
+### Property 10: Event Correlation by Name and Timestamp
 
-*For any* set of MatchResult objects rendered to the terminal table, the output string SHALL not contain any qualitative text descriptors (words such as "high", "medium", "low", "good", "bad", "strong", "weak").
-
-**Validates: Requirements 6.7, 8.6**
-
-### Property 12: Only Successful Matches Appear in Output
-
-*For any* set of matches where some fail during processing and some succeed, the output table SHALL contain exactly one row per successful match and zero rows for failed matches.
-
-**Validates: Requirements 6.8**
-
-### Property 13: Date Filtering Correctness
-
-*For any* set of events with varying `commence_time` values and a given target date, the system SHALL process only events whose `commence_time` falls within that target date (00:00:00 to 23:59:59 UTC).
+*For any* two `ScrapedMatch` objects from different adapters, they SHALL be correlated as the same event if and only if their normalized team names are equal AND their event timestamps differ by at most 2 hours (7200 seconds).
 
 **Validates: Requirements 7.2**
 
-### Property 14: Standard Deviation Computation
+### Property 11: Team Name Normalization Idempotence
 
-*For any* list of bookmaker implied probability sets (each a tuple of 3 values), the computed standard deviation for each outcome position SHALL equal the population standard deviation of that position's values across all bookmakers.
+*For any* team name string `s`, applying `normalize_team_name` twice SHALL produce the same result as applying it once: `normalize(normalize(s)) == normalize(s)`. Additionally, *for any* team name `s` and any suffix in {"FC", "CF", "SC", "AFC"}, `normalize(s + " " + suffix) == normalize(s)`.
 
-**Validates: Requirements 8.1**
+**Validates: Requirements 7.4**
 
-### Property 15: Variance Flag Threshold
+### Property 12: Minimum Bookmaker Threshold Enforcement
 
-*For any* match where the maximum standard deviation across the three 1X2 outcome probabilities exceeds 0.03, the Variance Flag SHALL be set to that maximum value. If the maximum is ≤ 0.03, the flag SHALL be 0.00.
+*For any* aggregated event, if the number of distinct bookmaker sources providing both 1X2 and Over/Under odds is less than 3, the event SHALL be excluded from the output. If the count is 3 or more, the event SHALL be included.
 
-**Validates: Requirements 8.2**
+**Validates: Requirements 7.3**
 
-### Property 16: Overround Computation
+### Property 13: Cache Persistence After Extraction
 
-*For any* set of three decimal odds, the computed overround SHALL equal the sum of their reciprocals minus 1.0.
+*For any* successful extraction run that produces aggregated events, each event's raw odds data SHALL be stored in the CacheStore, and a subsequent cache lookup with the same keys SHALL return the stored data without triggering new extraction.
 
-**Validates: Requirements 8.3**
-
-### Property 17: High Margin Flag Threshold
-
-*For any* match where any bookmaker's overround exceeds 0.10, the High Margin flag SHALL be set to the maximum overround value across all bookmakers. If no bookmaker exceeds 0.10, the flag SHALL be 0.00.
-
-**Validates: Requirements 8.4**
-
-### Property 18: Retro-Feedback Accuracy Computation
-
-*For any* predicted score (home_pred, away_pred) with predicted λ and μ, and *for any* actual score (home_actual, away_actual), the system SHALL correctly compute: (a) 1X2 correctness as whether the predicted outcome sign matches the actual outcome sign, (b) exact score correctness as whether predicted equals actual, and (c) λ error as |λ - home_actual| and μ error as |μ - away_actual|.
-
-**Validates: Requirements 9.3**
-
-### Property 19: Aggregate Metrics Correctness
-
-*For any* non-empty list of match comparisons, the aggregate 1X2 hit rate SHALL equal (count of x1x2_correct=True / total matches) × 100, the exact score hit rate SHALL equal (count of score_correct=True / total matches) × 100, the mean λ error SHALL equal the arithmetic mean of all individual λ errors, and the mean μ error SHALL equal the arithmetic mean of all individual μ errors.
-
-**Validates: Requirements 9.5**
-
-### Property 20: Retro-Feedback Output Contains Only Numeric Values
-
-*For any* set of match comparisons rendered to the retro-feedback table, the output string SHALL not contain any qualitative text descriptors and all accuracy values SHALL be represented as numeric values (1/0 for boolean, decimal for errors, percentage for rates).
-
-**Validates: Requirements 9.4, 9.6**
-
-### Property 21: Bookmaker Statistics Accumulation
-
-*For any* sequence of retro-feedback runs attributed to a bookmaker, the accumulated total_matches SHALL equal the count of all match results processed, correct_1x2 SHALL equal the count of correct predictions, and mean errors SHALL equal sum of individual errors divided by total_matches.
-
-**Validates: Requirements 10.2**
-
-### Property 22: Reliability Score Formula and Threshold Flagging
-
-*For any* bookmaker with a 1X2 hit rate in [0, 1], normalized λ error in [0, 1], and normalized μ error in [0, 1], the reliability score SHALL equal `0.5 * hit_rate + 0.25 * (1 - norm_lambda_error) + 0.25 * (1 - norm_mu_error)`, and the bookmaker SHALL be flagged as unreliable if and only if this score is strictly less than the configured threshold.
-
-**Validates: Requirements 10.3, 10.4**
-
-### Property 23: Bookmaker Report Output Contains Only Numeric Values
-
-*For any* set of bookmaker statistics rendered to the bookmaker report table, the output string SHALL not contain qualitative text descriptors, and all values SHALL be strictly numeric (including Status as 1 for active, 0 for excluded).
-
-**Validates: Requirements 10.5, 10.7**
+**Validates: Requirements 7.5**
 
 ## Error Handling
 
-### HTTP Errors and Timeouts
+### Error Categories and Responses
 
-| Scenario | Behavior |
-|----------|----------|
-| API timeout (>30s) | Log error with "TIMEOUT" indicator, cease processing for that request |
-| HTTP 4xx | Log error with status code, cease processing |
-| HTTP 5xx | Log error with status code, cease processing |
-| Network error | Log error with exception message, cease processing |
+| Error Type | Source | Response | Recovery |
+|-----------|--------|----------|----------|
+| HTTP Timeout (30s) | HTTPScraper | Raise `OddsExtractionError` | Retry up to 3× with backoff |
+| HTTP 4xx | HTTPScraper | Raise `OddsExtractionError` | Skip adapter, log error |
+| HTTP 5xx | HTTPScraper | Transient error | Retry up to 3× with backoff |
+| HTTP 429 | HTTPScraper | Rate limited | Wait Retry-After (or 60s default) |
+| Connection Reset | HTTPScraper | Transient error | Retry up to 3× with backoff |
+| Playwright Timeout (60s) | HeadlessScraper | Raise `OddsExtractionError` | Mark adapter unavailable |
+| Playwright Not Installed | Import check | ImportError caught | Skip headless adapters, log warning |
+| Parsing Error (invalid HTML) | HTTPScraper | Raise `OddsExtractionError` | Skip adapter |
+| Odds Format Unrecognized | `parse_odds_value` | Raise `ValueError` | Skip that outcome, log |
+| All Adapters Failed | OddsExtractor | Return stale cache or empty | Log critical warning |
+| Cache Expired + Extraction Failed | OddsExtractor | Return stale data with warning | User sees `[STALE]` indicator |
+| Adapter Degraded (3 failures) | AdapterRegistry | Mark DEGRADED | Skip in future runs, log investigation recommendation |
 
-No partial data is persisted on any HTTP failure.
+### Custom Exceptions
 
-### Cache Failures
+```python
+class OddsExtractionError(Exception):
+    """Raised when odds extraction fails (HTTP error, timeout, parsing failure)."""
+    def __init__(self, message: str, status_code: int | None = None, adapter_id: str | None = None):
+        self.status_code = status_code
+        self.adapter_id = adapter_id
+        super().__init__(message)
 
-| Scenario | Behavior |
-|----------|----------|
-| SQLite database locked | Retry up to 3 times with 1-second backoff, then proceed without cache |
-| Corrupt database file | Log warning, create fresh database, proceed without cached data |
-| Fresh fetch fails on expired entry | Return stale cached data with `[STALE]` warning to stderr |
 
-### Processing Failures
+class AdapterDiscoveryError(Exception):
+    """Raised when the adapter registry fails to scan the adapters directory."""
+    pass
+```
 
-| Scenario | Behavior |
-|----------|----------|
-| Anomalous odds (overround ≤ 0) | Exclude bookmaker for that match, log to stderr |
-| Fewer than 3 valid bookmakers after filtering | Skip match, log warning |
-| Optimizer non-convergence | Skip match, log match ID and "CONVERGENCE FAILED" to stderr |
-| Optimizer objective ≥ 1e-6 | Skip match, log match ID and objective value to stderr |
-| λ or μ non-positive | Skip match (should not occur with bounds, defensive check) |
+### Graceful Degradation Strategy
 
-### Input Validation
-
-| Scenario | Behavior |
-|----------|----------|
-| Missing `--sport` argument | Print usage message, exit with code 1 |
-| Invalid date format | Print "Invalid date format. Use YYYY-MM-DD.", exit with code 1 |
-| Missing `ODDS_API_KEY` env var | Print "ODDS_API_KEY environment variable not set.", exit with code 1 |
-| TTL outside [1, 48] range | Print "TTL must be between 1 and 48 hours.", exit with code 1 |
-| Unknown margin method | Print "Method must be 'shin' or 'logarithmic'.", exit with code 1 |
-
-### RetroFeedback Failures
-
-| Scenario | Behavior |
-|----------|----------|
-| No predictions found for date | Print "No predictions found for date YYYY-MM-DD.", exit with code 0 |
-| Scores API fails | Log error, report which matches could not be compared |
-| Actual score not yet available | Skip match, log warning indicating match may not be completed |
-| Bookmaker not found for --enable-bookmaker | Print "Bookmaker key not found.", exit with code 1 |
-| Division by zero in aggregates (0 matches) | Return 0.0 for all rates and means |
+1. **Single adapter failure** → Skip it, continue with remaining adapters
+2. **All scraping adapters fail** → Fall back to Odds API adapter (if configured)
+3. **All adapters fail + cache exists** → Return stale cached data with `[STALE]` warning
+4. **All adapters fail + no cache** → Exit with error message listing failed adapters
+5. **Headless not installed** → Silently skip headless-only adapters, operate with HTTP-only adapters
 
 ## Testing Strategy
 
-### Unit Tests (example-based)
+### Unit Tests
 
-Unit tests focus on specific scenarios, edge cases, and integration points:
+Unit tests cover specific examples, edge cases, and integration points:
 
-- **CLI argument parsing**: Valid/invalid arguments, defaults, missing required args
-- **HTTP error handling**: Mock 4xx, 5xx, timeout scenarios
-- **Shin method correctness**: Known odds → known true probabilities (from literature)
-- **Logarithmic method correctness**: Known odds → known true probabilities
-- **Optimizer with degenerate input**: Probabilities that cause non-convergence
-- **Tiebreaker edge case**: Matrix with multiple cells at same max probability
-- **Stale cache fallback**: Expired cache + API failure → stale data returned
-- **Output column order**: Verify exact column sequence matches specification
+- `test_adapter_base.py` — Verify ABC enforcement (missing methods raise TypeError)
+- `test_adapter_registry.py` — Discovery with 0, 1, N adapters; health status transitions
+- `test_http_scraper.py` — Parsing odds from HTML fixtures (decimal, fractional, American); CSS/XPath extraction
+- `test_headless_scraper.py` — Timeout behavior; optional dependency handling
+- `test_resilience.py` — Rate limiter edge cases; retry exhaustion; 429 handling
+- `test_odds_extractor.py` — Event correlation; threshold filtering; cache interactions
+- `test_team_normalization.py` — Specific suffix stripping, accent handling, edge cases
 
-### Property-Based Tests (universal properties)
+### Property-Based Tests (Hypothesis)
 
-Property-based tests verify universal properties across randomly generated inputs. Each property test runs a minimum of **100 iterations** using the `hypothesis` library.
+Property-based tests verify universal correctness across randomized inputs. Each test runs **minimum 100 iterations**.
 
-**Library**: [hypothesis](https://hypothesis.readthedocs.io/) (Python property-based testing framework)
-
-**Configuration**:
-```python
-from hypothesis import settings, given
-from hypothesis import strategies as st
-
-@settings(max_examples=100)
-```
-
-**Tag format for each test**:
-```python
-# Feature: betting-odds-calculator, Property {N}: {property_text}
-```
-
-**Properties to implement**:
-
-| Property | Module Under Test | Key Generators |
-|----------|-------------------|----------------|
-| 1: Cache round-trip | `cache_store.py` | Random JSON strings, sport keys, event IDs |
-| 2: Cache TTL invalidation | `cache_store.py` | Random timestamps, TTL values 1-48 |
-| 3: Cache hit prevents API call | `odds_extractor.py` | Random cached entries, matching requests |
-| 4: Sum-to-one invariant | `margin_eliminator.py` | Random decimal odds triplets (each > 1.0, sum of reciprocals > 1.0) |
-| 5: Output range [0,1] | `margin_eliminator.py` | Same generator as Property 4 |
-| 6: Anomalous odds exclusion | `margin_eliminator.py` | Odds where sum of reciprocals ≤ 1.0 |
-| 7: Optimization round-trip | `lambda_optimizer.py` | Random λ ∈ [0.3, 4.0], μ ∈ [0.3, 4.0] |
-| 8: Optimization bounds | `lambda_optimizer.py` | Random valid probability tuples |
-| 9: Score matrix structure | `score_matrix.py` | Random λ, μ ∈ (0, 5.0] |
-| 10: Argmax with tiebreaker | `score_matrix.py` | Random 6×6 probability matrices |
-| 11: Numeric-only output | `output.py` | Random MatchResult sets |
-| 12: Successful matches only | `output.py` | Mixed success/failure match sets |
-| 13: Date filtering | `odds_extractor.py` | Random events with random dates, target date |
-| 14: Std dev computation | `data_quality.py` | Random bookmaker probability lists |
-| 15: Variance flag threshold | `data_quality.py` | Random probability sets with varying std devs |
-| 16: Overround computation | `data_quality.py` | Random decimal odds triplets |
-| 17: High margin flag | `data_quality.py` | Random odds with varying overrounds |
-| 18: Retro accuracy computation | `retro_feedback.py` | Random predicted/actual score pairs, random λ/μ values |
-| 19: Aggregate metrics | `retro_feedback.py` | Random lists of MatchComparison objects |
-| 20: Retro output numeric-only | `retro_feedback.py` | Random MatchComparison sets rendered to table |
-| 21: Bookmaker stats accumulation | `bookmaker_scorer.py` | Random sequences of match results per bookmaker |
-| 22: Reliability score & threshold | `bookmaker_scorer.py` | Random hit rates, normalized errors, thresholds |
-| 23: Bookmaker report numeric-only | `bookmaker_scorer.py` | Random BookmakerStats sets rendered to table |
+| Test | Property | Tag |
+|------|----------|-----|
+| `test_discovery_completeness` | Property 1 | Feature: betting-odds-calculator, Property 1: Auto-discovery finds all conforming adapter modules |
+| `test_fault_isolation` | Property 2 | Feature: betting-odds-calculator, Property 2: Failing adapters don't prevent successful ones from contributing |
+| `test_odds_format_roundtrip` | Property 3 | Feature: betting-odds-calculator, Property 3: Decimal→fractional→decimal and decimal→american→decimal round trips preserve value |
+| `test_html_extraction_correct` | Property 4 | Feature: betting-odds-calculator, Property 4: Odds embedded in HTML at configured selectors are correctly extracted |
+| `test_http_error_surfaces` | Property 5 | Feature: betting-odds-calculator, Property 5: All HTTP errors produce OddsExtractionError with correct status |
+| `test_rate_limiter_timing` | Property 6 | Feature: betting-odds-calculator, Property 6: Inter-request delays fall within configured bounds |
+| `test_ua_rotation_coverage` | Property 7 | Feature: betting-odds-calculator, Property 7: All UA strings are used within one full cycle |
+| `test_retry_backoff` | Property 8 | Feature: betting-odds-calculator, Property 8: Retries follow exponential backoff and cap at 3 |
+| `test_degradation_threshold` | Property 9 | Feature: betting-odds-calculator, Property 9: 3 consecutive failures trigger DEGRADED status |
+| `test_event_correlation` | Property 10 | Feature: betting-odds-calculator, Property 10: Events correlate iff normalized names match and timestamps within 2h |
+| `test_normalization_idempotence` | Property 11 | Feature: betting-odds-calculator, Property 11: normalize(normalize(s)) == normalize(s) |
+| `test_min_bookmaker_threshold` | Property 12 | Feature: betting-odds-calculator, Property 12: Events with <3 sources are excluded, >=3 are included |
+| `test_cache_persistence` | Property 13 | Feature: betting-odds-calculator, Property 13: Successful extractions are cached and retrievable |
 
 ### Integration Tests
 
-- **End-to-end with mocked API**: Full pipeline from CLI invocation through to terminal output using recorded API responses
-- **SQLite persistence**: Verify cache file is created and survives script restart
-- **API quota header tracking**: Verify `x-requests-remaining` is logged after each API call
-- **Retro-feedback end-to-end**: Mock scores API, verify full comparison pipeline from stored predictions to output table
-- **Bookmaker scoring persistence**: Run multiple retro sessions, verify bookmaker_scores table accumulates correctly
-- **Bookmaker exclusion flow**: Flag a bookmaker via retro, verify it's excluded from subsequent odds fetches
-- **Re-enable bookmaker flow**: Flag then re-enable a bookmaker, verify it's included again
+- End-to-end extraction with mocked HTTP responses (fixture HTML files)
+- Cache round-trip: extract → cache → re-extract from cache
+- Full pipeline: extraction → margin elimination → optimization → score matrix
 
-### Test File Structure
+### Test Infrastructure
 
-```
-tests/
-├── test_cache_store.py          # Properties 1, 2, 3
-├── test_margin_eliminator.py    # Properties 4, 5, 6
-├── test_lambda_optimizer.py     # Properties 7, 8
-├── test_score_matrix.py         # Properties 9, 10
-├── test_output.py               # Properties 11, 12
-├── test_odds_extractor.py       # Property 13
-├── test_data_quality.py         # Properties 14, 15, 16, 17
-├── test_retro_feedback.py       # Properties 18, 19, 20
-├── test_bookmaker_scorer.py     # Properties 21, 22, 23
-└── test_integration.py          # End-to-end tests
-```
+- **Library**: `hypothesis` for property-based tests, `pytest` for all tests
+- **Mocking**: `unittest.mock` for HTTP responses, adapter failures, timing
+- **Fixtures**: HTML files in `tests/fixtures/` representing real bookmaker page structures
+- **Temp DB**: `tmp_path` fixture for all SQLite tests (no leftover files)
+
