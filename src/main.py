@@ -356,23 +356,36 @@ def _compute_multi_line_ou_probs(
     return result
 
 
-def run_polla_pipeline(events: list[AggregatedEvent], knockout: bool = False) -> None:
+def run_polla_pipeline(
+    events: list[AggregatedEvent],
+    knockout: bool = False,
+    sport: str = "soccer_fifa_world_cup",
+    prediction_date: str | None = None,
+) -> None:
     """Run the Polla Mundialista optimization pipeline.
 
     Processes each event through margin elimination → lambda optimization →
     ScoreMatrixGenerator → PollaScorer to find the optimal prediction
-    maximizing expected Polla points.
+    maximizing expected Polla points. Saves predictions to the database.
 
     Args:
         events: List of AggregatedEvent from OddsExtractor.
         knockout: Whether to use knockout stage scoring (double points).
+        sport: Sport/league key for storing predictions.
+        prediction_date: Date string for predictions. Defaults to today.
     """
+    from src.prediction_store import PredictionStore
+
     margin_eliminator = MarginEliminator(method="shin")
     lambda_optimizer = LambdaOptimizer()
     score_matrix_gen = ScoreMatrixGenerator()
     scorer = PollaScorer(is_knockout=knockout)
 
+    if prediction_date is None:
+        prediction_date = date_type.today().isoformat()
+
     predictions: list[tuple[str, str, int, int, float, tuple[int, int], float]] = []
+    store_data: list[dict] = []
 
     for event in events:
         # Step 1: Get real probabilities
@@ -438,10 +451,35 @@ def run_polla_pipeline(events: list[AggregatedEvent], knockout: bool = False) ->
             rec.max_probable_score,
             rec.max_probable_prob,
         ))
+        store_data.append({
+            "sport": sport,
+            "event_id": event.home_team.lower().replace(" ", "_")
+            + "_vs_"
+            + event.away_team.lower().replace(" ", "_")
+            + "_"
+            + prediction_date,
+            "home_team": event.home_team,
+            "away_team": event.away_team,
+            "home_goals": rec.predicted_score[0],
+            "away_goals": rec.predicted_score[1],
+            "lambda_home": lam,
+            "mu_away": mu,
+            "prediction_date": prediction_date,
+            "expected_points": rec.expected_points,
+        })
 
     if not predictions:
         print("No matches could be processed through the Polla pipeline.")
         return
+
+    # Save predictions to database for feedback tracking
+    if store_data:
+        try:
+            prediction_store = PredictionStore()
+            prediction_store.save_batch(store_data)
+            logger.info("Saved %d predictions to database.", len(store_data))
+        except Exception as exc:
+            logger.warning("Failed to save predictions: %s", exc)
 
     # Print table
     phase = "KNOCKOUT" if knockout else "GROUP"
@@ -586,7 +624,12 @@ def main(argv: list[str] | None = None) -> None:
 
     # Handle --polla mode
     if args.polla:
-        run_polla_pipeline(events, knockout=args.knockout)
+        run_polla_pipeline(
+            events,
+            knockout=args.knockout,
+            sport=args.sport,
+            prediction_date=extraction_date,
+        )
         return
 
     # Initialize pipeline components
