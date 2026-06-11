@@ -1,0 +1,29 @@
+[project]
+name = "betting-odds-calculator"
+version = "0.1.0"
+description = "Extract betting odds from The Odds API, remove bookmaker margins, and predict exact scores using Poisson modeling."
+requires-python = ">=3.9"
+dependencies = [
+    "requests",
+    "scipy",
+    "numpy",
+]
+
+[project.optional-dependencies]
+dev = [
+    "hypothesis",
+    "pytest",
+]
+
+[project.scripts]
+betting-odds = "src.main:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
