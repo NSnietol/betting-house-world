@@ -62,7 +62,7 @@ POOL_URL = (
     "https://www.golpredictor.com/pooldetail.aspx"
     "?pid=0%2cc1ca22da-764b-41b1-8a14-485e9733f23b"
 )
-LOGIN_URL = "https://www.golpredictor.com/home.aspx"
+LOGIN_URL = "https://www.golpredictor.com/login.aspx"
 
 
 @dataclass
@@ -228,33 +228,37 @@ def submit_predictions(
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
         page = browser.new_page()
+        page.set_default_timeout(15000)
 
         # Step 1: Login
-        page.goto(LOGIN_URL, timeout=30000)
-        page.wait_for_load_state("networkidle")
+        print("  Navigating to login page...")
+        page.goto("https://www.golpredictor.com/login.aspx", wait_until="domcontentloaded")
+        page.wait_for_timeout(2000)
 
         if "Bienvenido" not in page.content():
             print("  Logging in...")
-            user_input = page.locator("#ctl00_ContentPlaceInner_Login1_UserName")
-            pass_input = page.locator("#ctl00_ContentPlaceInner_Login1_Password")
-            login_btn = page.locator("#ctl00_ContentPlaceInner_Login1_LoginButton")
+            # Main login form: Username field (last one), Password, Submit (last one)
+            user_input = page.get_by_role("textbox", name="Usuario").last
+            pass_input = page.get_by_role("textbox", name="Contraseña")
 
-            if user_input.is_visible():
-                user_input.fill(user)
-                pass_input.fill(password)
-                login_btn.click()
-                page.wait_for_load_state("networkidle")
+            user_input.fill(user)
+            pass_input.fill(password)
+            page.get_by_role("button", name="Submit").last.click()
+            page.wait_for_timeout(3000)
+
+            if "Bienvenido" in page.content():
                 print("  ✓ Logged in")
             else:
-                print("  ERROR: Login form not found")
+                print("  ERROR: Login failed. Check credentials.")
                 browser.close()
                 return
         else:
             print("  ✓ Already logged in")
 
         # Step 2: Navigate to pool
-        page.goto(POOL_URL, timeout=30000)
-        page.wait_for_load_state("networkidle")
+        print("  Navigating to AMWELL pool...")
+        page.goto(POOL_URL, wait_until="domcontentloaded")
+        page.wait_for_timeout(2000)
 
         # Step 3: Fill predictions across all pages
         total_filled = 0
@@ -270,7 +274,7 @@ def submit_predictions(
                 save_btn = page.locator("#ctl00_ContentPlaceInner_butGuardar")
                 if save_btn.is_visible():
                     save_btn.click()
-                    page.wait_for_load_state("networkidle")
+                    page.wait_for_timeout(3000)
                     print(f"  ✓ Page {current_page}: saved {filled_on_page} predictions")
                 else:
                     print(f"  ⚠️  Page {current_page}: filled {filled_on_page} but save button not found")
@@ -283,7 +287,7 @@ def submit_predictions(
                 next_link = page.locator(f"a:has-text('{current_page}')")
                 if next_link.is_visible():
                     next_link.click()
-                    page.wait_for_load_state("networkidle")
+                    page.wait_for_timeout(3000)
                 else:
                     break
 
@@ -341,11 +345,7 @@ def _fill_page(page, predictions: list[MatchPrediction]) -> int:
         if best_match is None:
             continue
 
-        # Skip if already has a value (don't overwrite)
-        if best_match["homeVal"] and best_match["awayVal"]:
-            continue
-
-        # Fill the inputs
+        # Fill the inputs (overwrites existing predictions with updated model output)
         home_input = page.locator(f"#{best_match['homeId']}")
         away_input = page.locator(f"#{best_match['awayId']}")
 
