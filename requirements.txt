@@ -1,3 +1,5 @@
 requests
 scipy
 numpy
+beautifulsoup4
+lxml

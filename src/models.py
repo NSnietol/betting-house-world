@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +56,25 @@ class OddsEvent:
 
 
 @dataclass
+class OptimizationResult:
+    """Result of a Poisson parameter optimization from a single source."""
+
+    primary_lambda: float
+    primary_mu: float
+    secondary_lambda: float | None = None
+    secondary_mu: float | None = None
+
+
+@dataclass
+class DivergenceResult:
+    """Divergence metrics between primary and secondary optimization results."""
+
+    lambda_divergence: float
+    mu_divergence: float
+    is_high_divergence: bool
+
+
+@dataclass
 class MatchResult:
     """Result of processing a single match through the full pipeline."""
 
@@ -68,6 +88,13 @@ class MatchResult:
     variance_flag: float
     high_margin: float
     low_coverage: int
+    secondary_lambda: float | None = None
+    secondary_mu: float | None = None
+    lambda_divergence: float | None = None
+    mu_divergence: float | None = None
+    is_high_divergence: bool = False
+    polla_optimal_score: tuple[int, int] | None = None
+    polla_expected_points: float | None = None
 
 
 @dataclass
@@ -148,3 +175,55 @@ class BookmakerStats:
     mean_mu_error: float
     reliability_score: float
     is_active: bool  # False if flagged as unreliable
+
+
+# ---------------------------------------------------------------------------
+# Aggregation & Adapter Models
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class AggregatedEvent:
+    """A single match with odds aggregated from multiple bookmaker adapters."""
+
+    home_team: str
+    away_team: str
+    event_timestamp: datetime
+    bookmaker_odds_1x2: dict[str, tuple[float, float, float]]
+    # bookmaker_id -> (home_odds, draw_odds, away_odds)
+    bookmaker_odds_over_under: dict[str, tuple[float, float]]
+    # bookmaker_id -> (over_2.5_odds, under_2.5_odds)
+    source_count: int  # number of distinct bookmaker sources
+
+    # Enhanced multi-line O/U fields
+    overall_ou_lines: dict[str, dict[float, tuple[float, float]]] = field(
+        default_factory=dict
+    )
+    # bookmaker_id -> {threshold: (over_odds, under_odds)}
+
+    home_team_ou_lines: dict[str, dict[float, tuple[float, float]]] = field(
+        default_factory=dict
+    )
+    # bookmaker_id -> {threshold: (over_odds, under_odds)}
+
+    away_team_ou_lines: dict[str, dict[float, tuple[float, float]]] = field(
+        default_factory=dict
+    )
+    # bookmaker_id -> {threshold: (over_odds, under_odds)}
+
+    correct_score_odds: dict[str, dict[tuple[int, int], float]] = field(
+        default_factory=dict
+    )
+    # bookmaker_id -> {(home_goals, away_goals): decimal_odds}
+
+
+@dataclass
+class AdapterStatus:
+    """Status snapshot of a registered adapter."""
+
+    adapter_id: str
+    adapter_name: str
+    priority: int
+    health: str  # "reachable" | "unreachable" | "rate_limited" | "degraded"
+    extraction_method: str  # "http" | "headless" | "api"
+    consecutive_failures: int

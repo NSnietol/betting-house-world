@@ -8,8 +8,8 @@ Replace the single-source Odds API approach with a pluggable multi-source web sc
 
 ## Tasks
 
-- [ ] 1. Bookmaker Investigation and Discovery
-  - [ ] 1.1 Research and document scrapable bookmakers
+- [x] 1. Bookmaker Investigation and Discovery
+  - [x] 1.1 Research and document scrapable bookmakers
     - Investigate at least 5 Target_Bookmakers (Pinnacle, Bet365, Betfair, William Hill, 1xBet, DraftKings, Unibet)
     - For each bookmaker, document: URL patterns for soccer odds pages, HTML structure (server-rendered vs JS-heavy), CSS selectors or XPath for odds elements, odds format used (decimal/fractional/American)
     - Classify each into Tier 1 (simple HTTP scraping with requests+BS4), Tier 2 (requires Playwright headless browser), Tier 3 (heavily protected / infeasible)
@@ -17,17 +17,17 @@ Replace the single-source Odds API approach with a pluggable multi-source web sc
     - Output: Create `docs/bookmaker_investigation.md` with structured findings
     - _Requirements: 2.1, 2.2, 2.3, 2.5_
 
-- [ ] 2. Checkpoint — Review investigation findings
+- [x] 2. Checkpoint — Review investigation findings
   - Ensure investigation document is complete and at least 3 bookmakers are classified as Tier 1 or Tier 2. Ask the user if questions arise.
 
-- [ ] 3. Adapter Infrastructure
-  - [ ] 3.1 Create adapter base module with ABC and data types
+- [x] 3. Adapter Infrastructure
+  - [x] 3.1 Create adapter base module with ABC and data types
     - Create `src/adapters/__init__.py` (package init)
     - Create `src/adapters/base.py` with: `ExtractionMethod` enum (HTTP, HEADLESS, API), `AdapterHealth` enum (REACHABLE, UNREACHABLE, RATE_LIMITED, DEGRADED), `MarketOutcome` dataclass, `ScrapedMatch` dataclass, `OddsAdapter` ABC with abstract methods (`bookmaker_id`, `bookmaker_name`, `priority`, `extraction_method`, `base_url`, `fetch_1x2`, `fetch_over_under`, `health_check`)
     - Create `OddsExtractionError` custom exception in `src/adapters/base.py`
     - _Requirements: 1.1, 1.4, 1.5_
 
-  - [ ] 3.2 Create adapter registry with auto-discovery
+  - [x] 3.2 Create adapter registry with auto-discovery
     - Create `src/adapters/registry.py` with `AdapterRegistry` class
     - Implement `discover()`: scan the `src/adapters/` package using `pkgutil`/`importlib`, find all classes inheriting from `OddsAdapter`, instantiate and register them
     - Implement `get_all()`: return all adapters sorted by priority (ascending)
@@ -58,14 +58,14 @@ Replace the single-source Odds API approach with a pluggable multi-source web sc
     - Test priority sorting
     - _Requirements: 1.2, 1.3, 1.7_
 
-- [ ] 4. Scraping Layer
-  - [ ] 4.1 Create resilience module
+- [x] 4. Scraping Layer
+  - [x] 4.1 Create resilience module
     - Create `src/scraping/__init__.py` (package init)
     - Create `src/scraping/resilience.py` with: `RateLimiterConfig` dataclass, `ResilienceConfig` dataclass, `RateLimiter` class (per-domain token-bucket with jitter ±30%), `UserAgentRotator` class (pool of 10+ realistic UA strings with cycling), `RetryHandler` class (exponential backoff: 2, 4, 8 seconds; respects Retry-After on 429; max 3 retries)
     - Support optional proxy via `SCRAPER_PROXY` environment variable
     - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.7_
 
-  - [ ] 4.2 Create HTTP scraper module
+  - [x] 4.2 Create HTTP scraper module
     - Create `src/scraping/http_scraper.py` with `HTTPScraper` class
     - Implement `fetch_page(url, domain)`: uses `requests.get` with UA rotation, rate limiting, 30s timeout; raises `OddsExtractionError` on failure
     - Implement `extract_by_css(soup, selectors)`: extract elements using CSS selectors via BeautifulSoup
@@ -73,7 +73,7 @@ Replace the single-source Odds API approach with a pluggable multi-source web sc
     - Implement `parse_odds_value(raw)`: parse decimal ('2.50'), fractional ('3/2'), and American ('+150', '-200') formats into decimal float
     - _Requirements: 3.1, 3.2, 3.5, 3.6, 3.7_
 
-  - [ ] 4.3 Create headless browser scraper module (optional dependency)
+  - [x] 4.3 Create headless browser scraper module (optional dependency)
     - Create `src/scraping/headless.py` with `HeadlessScraper` class
     - Implement with try/except ImportError for Playwright — if not installed, raise ImportError on instantiation
     - Implement `fetch_rendered_page(url, wait_selector)`: load page, wait for selector (default timeout 60s), return rendered HTML
@@ -109,30 +109,30 @@ Replace the single-source Odds API approach with a pluggable multi-source web sc
     - Test retry exhaustion behavior
     - _Requirements: 3.1, 3.2, 3.5, 3.6, 3.7, 5.1, 5.3, 5.4_
 
-- [ ] 5. Checkpoint — Ensure infrastructure tests pass
+- [x] 5. Checkpoint — Ensure infrastructure tests pass
   - Ensure all tests pass (`uv run pytest tests/ -v`), ask the user if questions arise.
 
-- [ ] 6. Concrete Bookmaker Adapters
-  - [ ] 6.1 Implement first bookmaker adapter (Tier 1 — HTTP)
+- [x] 6. Concrete Bookmaker Adapters
+  - [x] 6.1 Implement first bookmaker adapter (Tier 1 — HTTP)
     - Create `src/adapters/<bookmaker_1>.py` implementing `OddsAdapter`
     - Implement `fetch_1x2()` and `fetch_over_under()` using HTTPScraper with bookmaker-specific CSS selectors/URL patterns identified in investigation
     - Implement `health_check()` with a lightweight HEAD request
     - Include bookmaker-specific odds page URL construction and parsing logic
     - _Requirements: 1.1, 1.4, 1.5, 2.4, 3.3, 3.4, 3.6_
 
-  - [ ] 6.2 Implement second bookmaker adapter (Tier 1 — HTTP)
+  - [x] 6.2 Implement second bookmaker adapter (Tier 1 — HTTP)
     - Create `src/adapters/<bookmaker_2>.py` implementing `OddsAdapter`
     - Implement `fetch_1x2()` and `fetch_over_under()` using HTTPScraper with bookmaker-specific selectors
     - Implement `health_check()`
     - _Requirements: 1.1, 1.4, 1.5, 2.4, 3.3, 3.4, 3.6_
 
-  - [ ] 6.3 Implement third bookmaker adapter (Tier 1 or Tier 2)
+  - [x] 6.3 Implement third bookmaker adapter (Tier 1 or Tier 2)
     - Create `src/adapters/<bookmaker_3>.py` implementing `OddsAdapter`
     - If Tier 2, use HeadlessScraper; if Tier 1, use HTTPScraper
     - Implement `fetch_1x2()`, `fetch_over_under()`, and `health_check()`
     - _Requirements: 1.1, 1.4, 1.5, 2.4, 3.3, 3.4, 4.1, 4.2_
 
-  - [ ] 6.4 Implement Odds API adapter (optional fallback)
+  - [x] 6.4 Implement Odds API adapter (optional fallback)
     - Create `src/adapters/odds_api.py` implementing `OddsAdapter`
     - Activate only when `ODDS_API_KEY` environment variable is set
     - Set higher priority number (lower priority) than scraping adapters
@@ -149,19 +149,19 @@ Replace the single-source Odds API approach with a pluggable multi-source web sc
     - Use Hypothesis to generate HTTP status codes in [400, 599] and timeouts, verify OddsExtractionError is raised with correct status
     - **Validates: Requirements 3.5**
 
-- [ ] 7. Rewrite OddsExtractor and Update Models
-  - [ ] 7.1 Add new data models to `src/models.py`
+- [x] 7. Rewrite OddsExtractor and Update Models
+  - [x] 7.1 Add new data models to `src/models.py`
     - Add `AggregatedEvent` dataclass (home_team, away_team, event_timestamp, bookmaker_odds_1x2 dict, bookmaker_odds_over_under dict, source_count)
     - Add `AdapterStatus` dataclass (adapter_id, adapter_name, priority, health, extraction_method, consecutive_failures)
     - _Requirements: 7.2, 7.3_
 
-  - [ ] 7.2 Update CacheStore schema
+  - [x] 7.2 Update CacheStore schema
     - Add `extraction_method` column (TEXT DEFAULT 'api') to the `cache` table via ALTER TABLE or recreate logic
     - Values: 'scraping_http', 'scraping_headless', 'api'
     - Ensure backward compatibility with existing cached data
     - _Requirements: 8.3_
 
-  - [ ] 7.3 Rewrite `src/odds_extractor.py` as adapter orchestrator
+  - [x] 7.3 Rewrite `src/odds_extractor.py` as adapter orchestrator
     - Replace the single-API approach with adapter-based orchestration
     - Initialize with `AdapterRegistry` and `CacheStore`
     - Implement `extract(sport, date, round_id)`: check cache → query healthy adapters → correlate events → enforce minimum threshold → cache results → return `list[AggregatedEvent]`
@@ -200,11 +200,11 @@ Replace the single-source Odds API approach with a pluggable multi-source web sc
     - Test adapter failure isolation
     - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5, 8.5_
 
-- [ ] 8. Checkpoint — Ensure all tests pass
+- [x] 8. Checkpoint — Ensure all tests pass
   - Ensure all tests pass (`uv run pytest tests/ -v`), ask the user if questions arise.
 
-- [ ] 9. CLI and Integration Wiring
-  - [ ] 9.1 Update `src/main.py` CLI to use adapter system
+- [x] 9. CLI and Integration Wiring
+  - [x] 9.1 Update `src/main.py` CLI to use adapter system
     - Initialize `AdapterRegistry` and call `discover()` at startup
     - Replace direct Odds API usage with new `OddsExtractor(registry, cache_store)`
     - Maintain existing CLI arguments (--sport, --date, --round, --retro, --bookmaker-report, --enable-bookmaker)
@@ -213,12 +213,12 @@ Replace the single-source Odds API approach with a pluggable multi-source web sc
     - Wire full pipeline: OddsExtractor → MarginEliminator → LambdaOptimizer → ScoreMatrixGenerator → DataQualityAnalyzer → TerminalOutput
     - _Requirements: 13.1, 13.2, 13.3, 13.4, 13.5, 12.1_
 
-  - [ ] 9.2 Update `src/retro_feedback.py` for multi-source adapters
+  - [x] 9.2 Update `src/retro_feedback.py` for multi-source adapters
     - Update retro-feedback logic to work with `AggregatedEvent` instead of single API response
     - Ensure per-bookmaker tracking works with adapter-sourced data
     - _Requirements: 15.1, 15.2, 15.3, 15.4_
 
-  - [ ] 9.3 Update `src/bookmaker_scorer.py` for multi-source adapters
+  - [x] 9.3 Update `src/bookmaker_scorer.py` for multi-source adapters
     - Ensure bookmaker scoring works with adapter IDs from the new system
     - Ensure excluded bookmaker list is passed to OddsExtractor at extraction time
     - _Requirements: 16.1, 16.2, 16.3, 16.4_
@@ -231,7 +231,7 @@ Replace the single-source Odds API approach with a pluggable multi-source web sc
     - Test graceful degradation when no adapters are available
     - _Requirements: 7.1, 7.5, 8.2, 12.1, 13.1_
 
-- [ ] 10. Final Checkpoint — Full validation
+- [x] 10. Final Checkpoint — Full validation
   - Ensure all tests pass (`uv run pytest tests/ -v`), ask the user if questions arise.
 
 ## Notes

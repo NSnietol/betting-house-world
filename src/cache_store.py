@@ -7,6 +7,9 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 
+# Valid extraction method values for the cache table
+VALID_EXTRACTION_METHODS = ("scraping_http", "scraping_headless", "api")
+
 
 class CacheStore:
     """Manages local SQLite caching of API responses and prediction/results data."""
@@ -70,9 +73,13 @@ class CacheStore:
                     bookmaker_keys TEXT NOT NULL,
                     response_json TEXT NOT NULL,
                     retrieved_at TEXT NOT NULL,
+                    extraction_method TEXT DEFAULT 'api',
                     UNIQUE(sport_key, market_type, event_id, bookmaker_keys)
                 )
             """)
+
+            # Migration: add extraction_method column to existing databases
+            CacheStore._migrate_add_extraction_method(cursor)
 
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_cache_lookup
@@ -143,6 +150,24 @@ class CacheStore:
 
         self._execute_with_retry(_setup)
 
+    @staticmethod
+    def _migrate_add_extraction_method(cursor: sqlite3.Cursor) -> None:
+        """Add extraction_method column to existing cache table if missing.
+
+        This migration handles backward compatibility for databases created
+        before the extraction_method column was introduced. Existing rows
+        receive the default value 'api'.
+
+        Args:
+            cursor: Active SQLite cursor within a transaction.
+        """
+        cursor.execute("PRAGMA table_info(cache)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if "extraction_method" not in columns:
+            cursor.execute(
+                "ALTER TABLE cache ADD COLUMN extraction_method TEXT DEFAULT 'api'"
+            )
+
     def get(
         self,
         sport_key: str,
@@ -162,8 +187,8 @@ class CacheStore:
             bookmaker_keys: Tuple of bookmaker keys to match.
 
         Returns:
-            A dict with 'response_json' and 'retrieved_at' if a cache entry
-            exists, or None if no matching entry is found.
+            A dict with 'response_json', 'retrieved_at', and 'extraction_method'
+            if a cache entry exists, or None if no matching entry is found.
         """
         sorted_keys = json.dumps(sorted(bookmaker_keys))
 
@@ -171,7 +196,7 @@ class CacheStore:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT response_json, retrieved_at
+                SELECT response_json, retrieved_at, extraction_method
                 FROM cache
                 WHERE sport_key = ?
                   AND market_type = ?
@@ -186,6 +211,7 @@ class CacheStore:
             return {
                 "response_json": row["response_json"],
                 "retrieved_at": row["retrieved_at"],
+                "extraction_method": row["extraction_method"] or "api",
             }
 
         return self._execute_with_retry(_query)
@@ -198,6 +224,7 @@ class CacheStore:
         bookmaker_keys: tuple[str, ...],
         response_json: str,
         retrieved_at: datetime,
+        extraction_method: str = "api",
     ) -> None:
         """Store a raw JSON response with metadata in the cache.
 
@@ -211,7 +238,14 @@ class CacheStore:
             bookmaker_keys: Tuple of bookmaker keys associated with the response.
             response_json: The raw JSON response string.
             retrieved_at: UTC datetime when the response was retrieved.
+            extraction_method: How the data was obtained. Must be one of
+                'scraping_http', 'scraping_headless', or 'api'. Defaults to 'api'.
         """
+        if extraction_method not in VALID_EXTRACTION_METHODS:
+            raise ValueError(
+                f"Invalid extraction_method '{extraction_method}'. "
+                f"Must be one of: {VALID_EXTRACTION_METHODS}"
+            )
         sorted_keys = json.dumps(sorted(bookmaker_keys))
         timestamp = retrieved_at.strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -220,10 +254,14 @@ class CacheStore:
             cursor.execute(
                 """
                 INSERT OR REPLACE INTO cache
-                    (sport_key, market_type, event_id, bookmaker_keys, response_json, retrieved_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (sport_key, market_type, event_id, bookmaker_keys,
+                     response_json, retrieved_at, extraction_method)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (sport_key, market_type, event_id, sorted_keys, response_json, timestamp),
+                (
+                    sport_key, market_type, event_id, sorted_keys,
+                    response_json, timestamp, extraction_method,
+                ),
             )
 
         self._execute_with_retry(_insert)

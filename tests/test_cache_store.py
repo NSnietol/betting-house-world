@@ -228,3 +228,144 @@ class TestRetryLogic:
         )
         result = cache_store.get("soccer_epl", "h2h", "retry_test", ("pinnacle",))
         assert result is not None
+
+
+class TestExtractionMethod:
+    """Tests for the extraction_method column functionality."""
+
+    def test_default_extraction_method_is_api(self, cache_store):
+        """When no extraction_method is provided, it defaults to 'api'."""
+        cache_store.put(
+            "soccer_epl",
+            "h2h",
+            "event_default",
+            ("pinnacle",),
+            '{"data": "test"}',
+            datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc),
+        )
+        result = cache_store.get("soccer_epl", "h2h", "event_default", ("pinnacle",))
+        assert result is not None
+        assert result["extraction_method"] == "api"
+
+    def test_store_scraping_http_method(self, cache_store):
+        """Can store and retrieve extraction_method='scraping_http'."""
+        cache_store.put(
+            "soccer_epl",
+            "h2h",
+            "event_http",
+            ("pinnacle",),
+            '{"data": "scraped"}',
+            datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc),
+            extraction_method="scraping_http",
+        )
+        result = cache_store.get("soccer_epl", "h2h", "event_http", ("pinnacle",))
+        assert result is not None
+        assert result["extraction_method"] == "scraping_http"
+
+    def test_store_scraping_headless_method(self, cache_store):
+        """Can store and retrieve extraction_method='scraping_headless'."""
+        cache_store.put(
+            "soccer_epl",
+            "h2h",
+            "event_headless",
+            ("bet365",),
+            '{"data": "headless"}',
+            datetime(2024, 2, 10, 8, 0, 0, tzinfo=timezone.utc),
+            extraction_method="scraping_headless",
+        )
+        result = cache_store.get("soccer_epl", "h2h", "event_headless", ("bet365",))
+        assert result is not None
+        assert result["extraction_method"] == "scraping_headless"
+
+    def test_store_api_method_explicitly(self, cache_store):
+        """Can explicitly pass extraction_method='api'."""
+        cache_store.put(
+            "soccer_epl",
+            "totals",
+            "event_api",
+            ("draftkings",),
+            '{"data": "api_data"}',
+            datetime(2024, 3, 5, 14, 30, 0, tzinfo=timezone.utc),
+            extraction_method="api",
+        )
+        result = cache_store.get("soccer_epl", "totals", "event_api", ("draftkings",))
+        assert result is not None
+        assert result["extraction_method"] == "api"
+
+    def test_invalid_extraction_method_raises(self, cache_store):
+        """Passing an invalid extraction_method raises ValueError."""
+        with pytest.raises(ValueError, match="Invalid extraction_method"):
+            cache_store.put(
+                "soccer_epl",
+                "h2h",
+                "event_bad",
+                ("pinnacle",),
+                '{"data": "bad"}',
+                datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+                extraction_method="invalid_method",
+            )
+
+    def test_upsert_updates_extraction_method(self, cache_store):
+        """Upserting an entry can change extraction_method."""
+        keys = ("pinnacle",)
+        cache_store.put(
+            "soccer_epl", "h2h", "event_upsert", keys,
+            '{"v": 1}',
+            datetime(2024, 1, 1, 10, 0, 0, tzinfo=timezone.utc),
+            extraction_method="api",
+        )
+        cache_store.put(
+            "soccer_epl", "h2h", "event_upsert", keys,
+            '{"v": 2}',
+            datetime(2024, 1, 2, 10, 0, 0, tzinfo=timezone.utc),
+            extraction_method="scraping_http",
+        )
+        result = cache_store.get("soccer_epl", "h2h", "event_upsert", keys)
+        assert result["extraction_method"] == "scraping_http"
+
+    def test_migration_on_existing_db(self, tmp_path):
+        """Databases without extraction_method column get it added via migration."""
+        import sqlite3
+
+        db_path = str(tmp_path / "legacy.db")
+        # Create a legacy database without extraction_method column
+        conn = sqlite3.connect(db_path)
+        conn.execute("""
+            CREATE TABLE cache (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sport_key TEXT NOT NULL,
+                market_type TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                bookmaker_keys TEXT NOT NULL,
+                response_json TEXT NOT NULL,
+                retrieved_at TEXT NOT NULL,
+                UNIQUE(sport_key, market_type, event_id, bookmaker_keys)
+            )
+        """)
+        # Insert legacy data without extraction_method
+        conn.execute(
+            """INSERT INTO cache (sport_key, market_type, event_id, bookmaker_keys, response_json, retrieved_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            ("soccer_epl", "h2h", "legacy_event", '["pinnacle"]', '{"legacy": true}', "2024-01-01T00:00:00Z"),
+        )
+        conn.commit()
+        conn.close()
+
+        # Now open with CacheStore — migration should add column
+        store = CacheStore(db_path=db_path)
+        result = store.get("soccer_epl", "h2h", "legacy_event", ("pinnacle",))
+        assert result is not None
+        assert result["response_json"] == '{"legacy": true}'
+        # Legacy data should default to 'api'
+        assert result["extraction_method"] == "api"
+
+    def test_extraction_method_column_exists_in_schema(self, cache_store):
+        """Verify the cache table has the extraction_method column."""
+        import sqlite3
+
+        conn = sqlite3.connect(cache_store.db_path)
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(cache)")
+        columns = {row[1] for row in cursor.fetchall()}
+        conn.close()
+        assert "extraction_method" in columns

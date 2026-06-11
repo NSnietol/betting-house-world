@@ -20,6 +20,8 @@ class TerminalOutput:
         "xG Away (μ)",
         "Suggested Score",
         "Score Prob %",
+        "Polla Optimal",
+        "Polla E[Pts]",
         "Variance Flag",
         "High Margin",
         "Low Coverage",
@@ -59,6 +61,20 @@ class TerminalOutput:
         """
         home_prob, draw_prob, away_prob = result.real_probs
 
+        # Format Polla fields
+        if result.polla_optimal_score is not None:
+            polla_str = (
+                f"{result.polla_optimal_score[0]}-{result.polla_optimal_score[1]}"
+            )
+        else:
+            polla_str = "-"
+
+        polla_pts_str = (
+            f"{result.polla_expected_points:.2f}"
+            if result.polla_expected_points is not None
+            else "0.00"
+        )
+
         return [
             f"{result.home_team} vs {result.away_team}",
             f"{home_prob * 100:.2f}",
@@ -68,6 +84,8 @@ class TerminalOutput:
             f"{result.mu_away:.2f}",
             f"{result.suggested_score[0]}-{result.suggested_score[1]}",
             f"{result.score_probability * 100:.2f}",
+            polla_str,
+            polla_pts_str,
             f"{result.variance_flag:.2f}",
             f"{result.high_margin:.2f}",
             f"{float(result.low_coverage):.2f}",

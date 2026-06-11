@@ -98,18 +98,18 @@ class TestTerminalOutput:
         result = self.output.render([match])
         data_row = result.split("\n")[1]
         columns = [col.strip() for col in data_row.split("|")]
-        assert columns[8] == "0.00"
-        assert columns[9] == "0.00"
         assert columns[10] == "0.00"
+        assert columns[11] == "0.00"
+        assert columns[12] == "0.00"
 
     def test_flags_show_values_when_triggered(self):
         match = self._make_result(variance_flag=0.045, high_margin=0.12, low_coverage=2)
         result = self.output.render([match])
         data_row = result.split("\n")[1]
         columns = [col.strip() for col in data_row.split("|")]
-        assert columns[8] == "0.04"  # variance flag rounded
-        assert columns[9] == "0.12"
-        assert columns[10] == "2.00"
+        assert columns[10] == "0.04"  # variance flag rounded
+        assert columns[11] == "0.12"
+        assert columns[12] == "2.00"
 
     def test_render_multiple_matches(self):
         matches = [
@@ -137,8 +137,9 @@ class TestTerminalOutput:
         data_row = result.split("\n")[1]
         columns = [col.strip() for col in data_row.split("|")]
 
-        # Columns 1-5, 7-10 should be purely numeric (parseable as float)
-        for i in [1, 2, 3, 4, 5, 7, 8, 9, 10]:
+        # Columns 1-5, 7, 9-12 should be purely numeric (parseable as float)
+        # Column 8 is Polla Optimal (score format like "1-0" or "-")
+        for i in [1, 2, 3, 4, 5, 7, 9, 10, 11, 12]:
             float(columns[i])  # Should not raise ValueError
 
     def test_pipe_delimiter_used(self):
@@ -148,7 +149,7 @@ class TestTerminalOutput:
             assert "|" in line
 
     def test_column_count_consistent(self):
-        """Each row should have exactly 11 columns."""
+        """Each row should have exactly 13 columns."""
         matches = [
             self._make_result(home="A", away="B"),
             self._make_result(home="C", away="D"),
@@ -156,4 +157,4 @@ class TestTerminalOutput:
         result = self.output.render(matches)
         for line in result.split("\n"):
             columns = [col.strip() for col in line.split("|")]
-            assert len(columns) == 11
+            assert len(columns) == 13
