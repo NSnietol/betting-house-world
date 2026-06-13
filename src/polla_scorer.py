@@ -7,6 +7,11 @@ Polla Mundialista Scoring Rules:
 - Group Stage: result=5, goals=2 each, diff=1, max=10
 - Knockout Stage: result=10, goals=4 each, diff=2, max=20
 - Only 90 minutes + stoppage time counts.
+
+Optimization enhancements:
+- Uses direct 1X2 probabilities for the trend component to avoid
+  truncation bias from the 6×6 grid (results with 6+ goals still
+  contribute to the home/draw/away mass).
 """
 
 from __future__ import annotations
@@ -77,15 +82,26 @@ class PollaScorer:
         """Maximum points achievable per match."""
         return 10 * self._multiplier
 
-    def recommend(self, matrix: list[list[float]]) -> PollaRecommendation:
+    def recommend(
+        self,
+        matrix: list[list[float]],
+        real_probs_1x2: tuple[float, float, float] | None = None,
+    ) -> PollaRecommendation:
         """Find the optimal Polla prediction for the given probability matrix.
 
         For EACH candidate prediction (h_pred, a_pred) from 0-0 to 5-5:
             E[points | prediction=(h_pred, a_pred)] =
                 sum_i sum_j P(home=i, away=j) * points(prediction=(h_pred, a_pred), actual=(i, j))
 
+        When real_probs_1x2 is provided, the trend component uses these direct
+        probabilities instead of summing over the truncated 6×6 grid. This avoids
+        underestimating the trend EV for high-scoring matches where P(total>=6) is
+        significant.
+
         Args:
             matrix: 6x6 Poisson probability grid where matrix[i][j] = P(home=i, away=j).
+            real_probs_1x2: Optional (p_home, p_draw, p_away) from devigged odds.
+                           If provided, used for the trend component calculation.
 
         Returns:
             PollaRecommendation with the optimal prediction and comparison data.
@@ -98,7 +114,7 @@ class PollaScorer:
         for h_pred in range(self.MAX_GOALS + 1):
             for a_pred in range(self.MAX_GOALS + 1):
                 expected, breakdown = self._expected_points_for(
-                    h_pred, a_pred, matrix
+                    h_pred, a_pred, matrix, real_probs_1x2
                 )
                 if expected > best_expected:
                     best_expected = expected
@@ -151,7 +167,11 @@ class PollaScorer:
         return points
 
     def expected_points(
-        self, h_pred: int, a_pred: int, matrix: list[list[float]]
+        self,
+        h_pred: int,
+        a_pred: int,
+        matrix: list[list[float]],
+        real_probs_1x2: tuple[float, float, float] | None = None,
     ) -> float:
         """Calculate expected points for a specific prediction.
 
@@ -161,22 +181,33 @@ class PollaScorer:
             h_pred: Predicted home goals.
             a_pred: Predicted away goals.
             matrix: 6x6 probability grid.
+            real_probs_1x2: Optional (p_home, p_draw, p_away) for trend calc.
 
         Returns:
             Expected Polla points for the given prediction.
         """
-        ep, _ = self._expected_points_for(h_pred, a_pred, matrix)
+        ep, _ = self._expected_points_for(h_pred, a_pred, matrix, real_probs_1x2)
         return ep
 
     def _expected_points_for(
-        self, h_pred: int, a_pred: int, matrix: list[list[float]]
+        self,
+        h_pred: int,
+        a_pred: int,
+        matrix: list[list[float]],
+        real_probs_1x2: tuple[float, float, float] | None = None,
     ) -> tuple[float, dict[str, float]]:
         """Compute expected Polla points and breakdown for a candidate prediction.
+
+        When real_probs_1x2 is provided, the trend (result) component uses
+        the direct probability from devigged odds rather than summing the
+        truncated grid. This eliminates the underestimation caused by the
+        6×6 grid not capturing results with 6+ total goals.
 
         Args:
             h_pred: Predicted home goals.
             a_pred: Predicted away goals.
             matrix: 6x6 probability grid.
+            real_probs_1x2: Optional (p_home, p_draw, p_away) for trend calc.
 
         Returns:
             Tuple of (total_expected_points, breakdown_dict).
@@ -189,15 +220,26 @@ class PollaScorer:
         pred_sign = _result_sign(h_pred, a_pred)
         pred_diff = h_pred - a_pred
 
+        # Use direct 1X2 probs for the trend component if available
+        if real_probs_1x2 is not None:
+            p_home, p_draw, p_away = real_probs_1x2
+            if pred_sign == 1:
+                e_result = p_home * self.result_points
+            elif pred_sign == 0:
+                e_result = p_draw * self.result_points
+            else:
+                e_result = p_away * self.result_points
+
         for i in range(self.MAX_GOALS + 1):
             for j in range(self.MAX_GOALS + 1):
                 prob = matrix[i][j]
                 if prob <= 0:
                     continue
 
-                # Correct result
-                if _result_sign(i, j) == pred_sign:
-                    e_result += prob * self.result_points
+                # Correct result — only from grid if no direct probs
+                if real_probs_1x2 is None:
+                    if _result_sign(i, j) == pred_sign:
+                        e_result += prob * self.result_points
 
                 # Correct home goals
                 if i == h_pred:

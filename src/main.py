@@ -16,6 +16,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from src.adapters.registry import AdapterRegistry
 from src.cache_store import CacheStore
+from src.dixon_coles import apply_dixon_coles_correction, apply_world_cup_chill
 from src.lambda_optimizer import LambdaOptimizer
 from src.margin_eliminator import AnomalousOddsError, MarginEliminator
 from src.models import AggregatedEvent
@@ -31,6 +32,17 @@ _ADAPTER_DISPLAY_NAMES: dict[str, str] = {
     "onexbet": "1xBet",
     "betfair": "Betfair",
     "the_odds_api": "The Odds API",
+}
+
+# Sharpness weights for bookmaker probability aggregation.
+# Higher weight = more trusted source (sharper lines, lower margins).
+# Betfair Exchange and Pinnacle are the gold standard; The Odds API
+# aggregates ~24 bookmakers internally so it's a robust consensus.
+SHARPNESS_WEIGHTS: dict[str, float] = {
+    "betfair": 0.45,
+    "the_odds_api": 0.35,
+    "onexbet": 0.20,
+    "unibet": 0.20,
 }
 
 
@@ -202,21 +214,35 @@ def run_polla_pipeline(
     store_data: list[dict] = []
 
     for event in events:
-        # Step 1: Get real probabilities
-        real_probs_list: list[tuple[float, float, float]] = []
+        # Step 1: Get real probabilities with sharpness-weighted aggregation
+        real_probs_by_source: list[tuple[str, tuple[float, float, float]]] = []
         for bm_id, odds_1x2 in event.bookmaker_odds_1x2.items():
             try:
                 real_probs = margin_eliminator.eliminate(odds_1x2)
-                real_probs_list.append(real_probs)
+                real_probs_by_source.append((bm_id, real_probs))
             except AnomalousOddsError:
                 continue
 
-        if not real_probs_list:
+        if not real_probs_by_source:
             continue
 
-        avg_home = sum(p[0] for p in real_probs_list) / len(real_probs_list)
-        avg_draw = sum(p[1] for p in real_probs_list) / len(real_probs_list)
-        avg_away = sum(p[2] for p in real_probs_list) / len(real_probs_list)
+        # Sharpness-weighted average (falls back to equal weights for unknown sources)
+        default_weight = 0.25
+        total_weight = 0.0
+        weighted_home = 0.0
+        weighted_draw = 0.0
+        weighted_away = 0.0
+
+        for bm_id, (p_h, p_d, p_a) in real_probs_by_source:
+            w = SHARPNESS_WEIGHTS.get(bm_id, default_weight)
+            weighted_home += w * p_h
+            weighted_draw += w * p_d
+            weighted_away += w * p_a
+            total_weight += w
+
+        avg_home = weighted_home / total_weight
+        avg_draw = weighted_draw / total_weight
+        avg_away = weighted_away / total_weight
         avg_probs = (avg_home, avg_draw, avg_away)
 
         real_prob_over = _compute_over_probability(event)
@@ -248,14 +274,20 @@ def run_polla_pipeline(
                 continue
             lam, mu = result
 
-        # Step 3: Build Poisson score matrix
+        # Step 3: Build Poisson score matrix with corrections
         score_result = score_matrix_gen.generate(lam, mu)
         if score_result is None:
             continue
         matrix = score_result["matrix"]
 
-        # Step 4: Polla optimization using the matrix
-        rec = scorer.recommend(matrix)
+        # Apply Dixon-Coles correlation correction (low-scoring corner)
+        matrix = apply_dixon_coles_correction(matrix, lam, mu)
+
+        # Apply World Cup chill factor (teams protect slim leads)
+        matrix = apply_world_cup_chill(matrix, lam, mu)
+
+        # Step 4: Polla optimization using corrected matrix + direct 1X2 probs
+        rec = scorer.recommend(matrix, real_probs_1x2=avg_probs)
 
         # Collect per-source odds for display
         source_odds: dict[str, tuple[float, float, float]] = event.bookmaker_odds_1x2
