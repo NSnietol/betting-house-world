@@ -16,7 +16,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from src.adapters.registry import AdapterRegistry
 from src.cache_store import CacheStore
-from src.dixon_coles import apply_dixon_coles_correction, apply_world_cup_chill
+from src.dixon_coles import apply_dixon_coles_correction
 from src.lambda_optimizer import LambdaOptimizer
 from src.margin_eliminator import AnomalousOddsError, MarginEliminator
 from src.models import AggregatedEvent
@@ -282,9 +282,6 @@ def run_polla_pipeline(
 
         # Apply Dixon-Coles correlation correction (low-scoring corner)
         matrix = apply_dixon_coles_correction(matrix, lam, mu)
-
-        # Apply World Cup chill factor (teams protect slim leads)
-        matrix = apply_world_cup_chill(matrix, lam, mu)
 
         # Step 4: Polla optimization using corrected matrix + direct 1X2 probs
         rec = scorer.recommend(matrix, real_probs_1x2=avg_probs)
