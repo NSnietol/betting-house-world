@@ -257,11 +257,13 @@ class FeedbackAnalyzer:
             date: If provided, analyze only that date. Otherwise analyze all.
         """
         if date:
-            summary = self.analyze_date(date)
+            feedbacks = self._get_feedbacks_for_date(date)
             header = f"FEEDBACK REPORT — {date}"
         else:
-            summary = self.analyze_all()
+            feedbacks = self._get_all_feedbacks()
             header = "FEEDBACK REPORT — CUMULATIVE"
+
+        summary = self._build_summary(feedbacks)
 
         print(f"\n{'='*60}")
         print(f"  {header}")
@@ -271,6 +273,22 @@ class FeedbackAnalyzer:
             print("  No prediction-result pairs available.")
             print(f"{'='*60}\n")
             return
+
+        # Per-match detail table
+        print(f"\n  {'Match':<30} {'Pred':>6} {'Actual':>7} {'Pts':>4} {'Result':>7}")
+        print(f"  {'-'*30} {'-'*6} {'-'*7} {'-'*4} {'-'*7}")
+        for f in feedbacks:
+            match_name = f"{f.home_team} vs {f.away_team}"
+            if len(match_name) > 30:
+                match_name = match_name[:27] + "..."
+            pred_str = f"{f.predicted_score[0]}-{f.predicted_score[1]}"
+            actual_str = f"{f.actual_score[0]}-{f.actual_score[1]}"
+            result_str = "✓" if f.result_correct else "✗"
+            print(
+                f"  {match_name:<30} {pred_str:>6} {actual_str:>7} "
+                f"{f.polla_points_earned:>4} {result_str:>7}"
+            )
+        print()
 
         print(f"  Matches analyzed:     {summary.total_matches}")
         print(f"  Total Polla points:   {summary.total_polla_points}")

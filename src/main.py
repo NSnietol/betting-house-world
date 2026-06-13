@@ -73,9 +73,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--retro",
+        nargs="?",
+        const="auto",
         default=None,
         metavar="DATE",
-        help="Run retro-feedback mode for the given date (YYYY-MM-DD).",
+        help="Run retro-feedback mode. If DATE is given, analyze that date. "
+        "If no date, auto-fetch results from The Odds API and run cumulative feedback.",
     )
     parser.add_argument(
         "--bookmaker-report",
@@ -611,8 +614,27 @@ def main(argv: list[str] | None = None) -> None:
 
     # Handle --retro mode
     if args.retro:
-        retro = RetroFeedback(cache_store, args.sport)
-        retro.run(args.retro)
+        if args.retro == "auto":
+            # Automatic mode: fetch results from API, then run cumulative feedback
+            from src.feedback_analyzer import FeedbackAnalyzer
+            from src.results_collector import ResultsCollector
+
+            collector = ResultsCollector()
+            print(f"Fetching actual results from The Odds API for {args.sport}...")
+            try:
+                count = collector.collect_from_api(sport=args.sport, days_back=3)
+                print(f"  ✓ Collected {count} completed match result(s).\n")
+            except RuntimeError as exc:
+                print(f"  ✗ {exc}\n")
+                return
+
+            # Run cumulative feedback report (all predictions with matching results)
+            analyzer = FeedbackAnalyzer()
+            analyzer.print_report(date=None)
+        else:
+            # Date-specific mode: use existing RetroFeedback
+            retro = RetroFeedback(cache_store, args.sport)
+            retro.run(args.retro)
         return
 
     # Get excluded bookmakers

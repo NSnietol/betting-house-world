@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import time
 from datetime import datetime, timezone
+
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +174,118 @@ class ResultsCollector:
             return [dict(row) for row in cursor.fetchall()]
 
         return self._execute_with_retry(_query)
+
+    def collect_from_api(
+        self, sport: str = "soccer_fifa_world_cup", days_back: int = 3
+    ) -> int:
+        """Fetch actual match results from The Odds API scores endpoint.
+
+        Calls the scores endpoint, filters to completed matches, maps scores
+        to home/away goals, and stores via store_result().
+
+        Args:
+            sport: Sport/league key for the API (e.g., 'soccer_fifa_world_cup').
+            days_back: Number of days back to fetch results for (1-3).
+
+        Returns:
+            Number of new results stored.
+
+        Raises:
+            RuntimeError: If ODDS_API_KEY is not set or the API request fails.
+        """
+        api_key = os.environ.get("ODDS_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "ODDS_API_KEY environment variable is not set. "
+                "Cannot fetch results from The Odds API."
+            )
+
+        url = (
+            f"https://api.the-odds-api.com/v4/sports/{sport}/scores/"
+            f"?apiKey={api_key}&daysFrom={days_back}"
+        )
+
+        logger.info("Fetching scores from The Odds API: sport=%s, daysFrom=%d", sport, days_back)
+
+        try:
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Failed to fetch scores from The Odds API: {exc}") from exc
+
+        data = response.json()
+        if not isinstance(data, list):
+            logger.warning("Unexpected API response format (not a list).")
+            return 0
+
+        count = 0
+        for match in data:
+            # Only process completed matches
+            if not match.get("completed", False):
+                continue
+
+            scores = match.get("scores")
+            if not scores:
+                continue
+
+            home_team = match.get("home_team", "")
+            away_team = match.get("away_team", "")
+            commence_time = match.get("commence_time", "")
+
+            if not home_team or not away_team or not commence_time:
+                continue
+
+            # Extract match date from commence_time (ISO format)
+            try:
+                match_dt = datetime.fromisoformat(commence_time.replace("Z", "+00:00"))
+                match_date = match_dt.strftime("%Y-%m-%d")
+            except (ValueError, AttributeError):
+                logger.warning("Could not parse commence_time: %s", commence_time)
+                continue
+
+            # Map scores to home/away goals
+            home_goals: int | None = None
+            away_goals: int | None = None
+            for score_entry in scores:
+                name = score_entry.get("name", "")
+                score_val = score_entry.get("score", "")
+                try:
+                    goals = int(score_val)
+                except (ValueError, TypeError):
+                    continue
+
+                if name == home_team:
+                    home_goals = goals
+                elif name == away_team:
+                    away_goals = goals
+
+            if home_goals is None or away_goals is None:
+                logger.warning(
+                    "Could not map scores for %s vs %s. Scores: %s",
+                    home_team, away_team, scores,
+                )
+                continue
+
+            # Generate event_id consistent with prediction store
+            event_id = self._generate_event_id(home_team, away_team, match_date)
+
+            self.store_result(
+                sport=sport,
+                event_id=event_id,
+                home_team=home_team,
+                away_team=away_team,
+                home_goals=home_goals,
+                away_goals=away_goals,
+                match_date=match_date,
+            )
+            count += 1
+            logger.info(
+                "Stored result from API: %s %d-%d %s (%s)",
+                home_team, home_goals, away_goals, away_team, match_date,
+            )
+
+        logger.info("Collected %d completed results from The Odds API.", count)
+        return count
 
     def import_from_json(self, filepath: str) -> int:
         """Import results from a JSON file.
