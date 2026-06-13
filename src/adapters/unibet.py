@@ -31,6 +31,7 @@ _LEAGUE_GROUP_IDS: dict[str, int] = {
     "soccer_france_ligue_one": 1000094995,
     "soccer_uefa_champs_league": 2000050648,
     "soccer_world_cup": 2010133908,
+    "soccer_fifa_world_cup": 2010133908,
 }
 
 # Legacy path mapping (kept for reference/fallback)

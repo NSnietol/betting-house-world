@@ -10,6 +10,11 @@ import argparse
 import logging
 import sys
 from datetime import date as date_type
+from pathlib import Path
+
+# Auto-load .env file from project root
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from src.adapters.registry import AdapterRegistry
 from src.bookmaker_scorer import BookmakerScorer
@@ -28,6 +33,14 @@ from src.value_detector import ValueBetDetector
 from src.value_output import ValueOutput
 
 logger = logging.getLogger(__name__)
+
+# Display names for adapter IDs in output
+_ADAPTER_DISPLAY_NAMES: dict[str, str] = {
+    "unibet": "Kambi/Unibet",
+    "onexbet": "1xBet",
+    "betfair": "Betfair",
+    "the_odds_api": "The Odds API",
+}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -442,6 +455,10 @@ def run_polla_pipeline(
 
         # Step 4: Polla optimization using the matrix
         rec = scorer.recommend(matrix)
+
+        # Collect per-source odds for display
+        source_odds: dict[str, tuple[float, float, float]] = event.bookmaker_odds_1x2
+
         predictions.append((
             f"{event.home_team} vs {event.away_team}",
             f"{rec.predicted_score[0]}-{rec.predicted_score[1]}",
@@ -450,6 +467,7 @@ def run_polla_pipeline(
             rec.expected_points,
             rec.max_probable_score,
             rec.max_probable_prob,
+            source_odds,
         ))
         store_data.append({
             "sport": sport,
@@ -489,13 +507,17 @@ def run_polla_pipeline(
     print(f"{'Match':<35} {'Optimal':>8} {'E[Pts]':>8} {'Most Prob':>10} {'Prob%':>6}")
     print(f"{'-'*35} {'-'*8} {'-'*8} {'-'*10} {'-'*6}")
 
-    for match_name, score_str, h, a, exp_pts, most_prob, mp_prob in predictions:
+    for match_name, score_str, h, a, exp_pts, most_prob, mp_prob, source_odds in predictions:
         mp_str = f"{most_prob[0]}-{most_prob[1]}"
         differs = " *" if (h, a) != most_prob else ""
         print(
             f"{match_name:<35} {score_str:>8} {exp_pts:>8.2f} "
             f"{mp_str:>10} {mp_prob*100:>5.1f}%{differs}"
         )
+        # Per-source breakdown
+        for bm_id, odds in source_odds.items():
+            bm_name = _ADAPTER_DISPLAY_NAMES.get(bm_id, bm_id)
+            print(f"    └─ {bm_name:<18} H={odds[0]:.2f}  D={odds[1]:.2f}  A={odds[2]:.2f}")
 
     print(f"{'-'*72}")
     print("  * = optimal differs from most probable score")

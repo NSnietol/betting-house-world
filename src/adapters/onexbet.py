@@ -47,6 +47,7 @@ _LEAGUE_IDS: dict[str, int] = {
     "soccer_france_ligue_one": 12821,
     "soccer_uefa_champs_league": 118587,
     "soccer_world_cup": 2708736,
+    "soccer_fifa_world_cup": 2708736,
 }
 
 # 1xBet base URL
