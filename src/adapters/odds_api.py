@@ -219,7 +219,11 @@ class OddsAPIAdapter(OddsAdapter):
                 for market in bookmaker.get("markets", []):
                     if market.get("key") != "h2h":
                         continue
-                    outcomes = self._extract_h2h_outcomes(market.get("outcomes", []))
+                    outcomes = self._extract_h2h_outcomes(
+                        market.get("outcomes", []),
+                        home_team=event.get("home_team", ""),
+                        away_team=event.get("away_team", ""),
+                    )
                     if outcomes:
                         matches.append(
                             ScrapedMatch(
@@ -270,22 +274,53 @@ class OddsAPIAdapter(OddsAdapter):
         return matches
 
     @staticmethod
-    def _extract_h2h_outcomes(raw_outcomes: list[dict]) -> list[MarketOutcome]:
+    def _extract_h2h_outcomes(
+        raw_outcomes: list[dict], home_team: str = "", away_team: str = ""
+    ) -> list[MarketOutcome]:
         """Convert API h2h outcomes into MarketOutcome objects.
+
+        The Odds API returns outcomes as [home_team_name, away_team_name, Draw]
+        but our pipeline expects [Home, Draw, Away] order.
 
         Args:
             raw_outcomes: List of outcome dicts with 'name' and 'price' keys.
+            home_team: Home team name for mapping.
+            away_team: Away team name for mapping.
 
         Returns:
-            List of MarketOutcome (Home, Draw, Away).
+            List of MarketOutcome ordered as [Home, Draw, Away].
         """
-        outcomes: list[MarketOutcome] = []
+        home_odds: float | None = None
+        draw_odds: float | None = None
+        away_odds: float | None = None
+
         for outcome in raw_outcomes:
             name = outcome.get("name", "")
             price = outcome.get("price")
-            if price is not None:
-                outcomes.append(MarketOutcome(name=name, odds=float(price)))
-        return outcomes
+            if price is None:
+                continue
+
+            name_lower = name.lower()
+            if name_lower == "draw" or name_lower == "x":
+                draw_odds = float(price)
+            elif name_lower == home_team.lower() or (home_odds is None and name_lower != away_team.lower()):
+                home_odds = float(price)
+            else:
+                away_odds = float(price)
+
+        if home_odds is None or draw_odds is None or away_odds is None:
+            # Fallback: return in original order with generic names
+            return [
+                MarketOutcome(name=o.get("name", ""), odds=float(o["price"]))
+                for o in raw_outcomes
+                if o.get("price") is not None
+            ]
+
+        return [
+            MarketOutcome(name="Home", odds=home_odds),
+            MarketOutcome(name="Draw", odds=draw_odds),
+            MarketOutcome(name="Away", odds=away_odds),
+        ]
 
     @staticmethod
     def _extract_totals_outcomes(raw_outcomes: list[dict]) -> list[MarketOutcome]:
