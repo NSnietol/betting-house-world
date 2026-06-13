@@ -36,15 +36,88 @@ POOL_URL = (
     "?pid=0%2cc1ca22da-764b-41b1-8a14-485e9733f23b"
 )
 
+# English → Spanish team name translation for golpredictor.com
+_NAME_MAP: dict[str, str] = {
+    "germany": "alemania",
+    "netherlands": "paises bajos",
+    "england": "inglaterra",
+    "spain": "espana",
+    "france": "francia",
+    "belgium": "belgica",
+    "switzerland": "suiza",
+    "sweden": "suecia",
+    "portugal": "portugal",
+    "argentina": "argentina",
+    "brazil": "brasil",
+    "usa": "estados unidos",
+    "south korea": "corea del sur",
+    "south africa": "sudafrica",
+    "saudi arabia": "arabia saudita",
+    "ivory coast": "costa de marfil",
+    "czech republic": "republica checa",
+    "new zealand": "nueva zelanda",
+    "bosnia & herzegovina": "bosnia-herzegovina",
+    "bosnia and herzegovina": "bosnia-herzegovina",
+    "dr congo": "rd congo",
+    "curacao": "curazao",
+    "curaçao": "curazao",
+    "cape verde": "cabo verde",
+    "iran": "iran",
+    "iraq": "irak",
+    "qatar": "catar",
+    "morocco": "marruecos",
+    "tunisia": "tunez",
+    "algeria": "argelia",
+    "egypt": "egipto",
+    "senegal": "senegal",
+    "jordan": "jordania",
+    "norway": "noruega",
+    "croatia": "croacia",
+    "turkey": "turquia",
+    "scotland": "escocia",
+    "haiti": "haiti",
+    "panama": "panama",
+    "japan": "japon",
+    "australia": "australia",
+    "paraguay": "paraguay",
+    "colombia": "colombia",
+    "uzbekistan": "uzbekistan",
+    "ghana": "ghana",
+    "austria": "austria",
+    "mexico": "mexico",
+    "canada": "canada",
+    "uruguay": "uruguay",
+}
+
 
 def normalize(name: str) -> str:
     nfkd = unicodedata.normalize("NFKD", name)
     return "".join(c for c in nfkd if not unicodedata.combining(c)).lower().strip()
 
 
+def translate_to_spanish(name: str) -> str:
+    """Translate English team names to Spanish equivalents for golpredictor."""
+    norm = normalize(name)
+    if norm in _NAME_MAP:
+        return _NAME_MAP[norm]
+    # Try splitting "Home - Away" and translating each part
+    parts = norm.replace(" - ", "|").replace(" vs ", "|").split("|")
+    translated = []
+    for part in parts:
+        part = part.strip()
+        translated.append(_NAME_MAP.get(part, part))
+    return " - ".join(translated)
+
+
 def fuzzy_match(a: str, b: str) -> float:
-    sa = set(normalize(a).replace("-", " ").split())
-    sb = set(normalize(b).replace("-", " ").split())
+    """Jaccard similarity with English→Spanish translation."""
+    # Translate each team in the match name
+    parts = a.replace(" - ", "|").replace(" vs ", "|").split("|")
+    a_translated = " ".join(translate_to_spanish(p.strip()) for p in parts)
+    a_norm = normalize(a_translated).replace("-", " ")
+    b_norm = normalize(b).replace("-", " ")
+    sa = set(a_norm.split())
+    sb = set(b_norm.split())
     if not sa or not sb:
         return 0.0
     return len(sa & sb) / len(sa | sb)
@@ -82,11 +155,14 @@ def fill_page(page, predictions: list[dict]) -> tuple[int, list[dict]]:
 
     filled = 0
     remaining = []
+    matched_page_ids = set()
 
     for pred in predictions:
         best = None
         best_score = 0.0
         for pm in page_data:
+            if pm["homeId"] in matched_page_ids:
+                continue
             score = fuzzy_match(pred["match"], pm["match"])
             if score > best_score and score > 0.3:
                 best_score = score
@@ -94,25 +170,30 @@ def fill_page(page, predictions: list[dict]) -> tuple[int, list[dict]]:
 
         if best is None:
             remaining.append(pred)
+            print(f"    ⚠ NOT FOUND on page: {pred['match']}")
             continue
 
-        # Skip already filled (unless --force would be passed externally)
+        matched_page_ids.add(best["homeId"])
+
+        # Check if already filled with same value
         if best["homeVal"] and best["awayVal"]:
-            # Check if prediction differs from what's on the page
             if str(pred["home"]) == best["homeVal"] and str(pred["away"]) == best["awayVal"]:
-                continue  # Already correct, skip
-            # Different value — overwrite it
-            pass
+                print(f"    ✓ ALREADY CORRECT: {best['match']} = {pred['home']}-{pred['away']}")
+                continue
+            # Different value — overwrite
+            print(f"    ↻ UPDATING: {best['match']}: {best['homeVal']}-{best['awayVal']} → {pred['home']}-{pred['away']}")
 
         home_el = page.locator(f"#{best['homeId']}")
         away_el = page.locator(f"#{best['awayId']}")
         if home_el.is_visible() and away_el.is_visible():
             home_el.fill(str(pred["home"]))
             away_el.fill(str(pred["away"]))
-            print(f"    {best['match']}: {pred['home']}-{pred['away']}")
+            if not best["homeVal"] and not best["awayVal"]:
+                print(f"    ✚ NEW: {best['match']}: {pred['home']}-{pred['away']}")
             filled += 1
         else:
             remaining.append(pred)
+            print(f"    🔒 LOCKED: {best['match']} (match already started)")
 
     return filled, remaining
 
