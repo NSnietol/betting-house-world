@@ -514,10 +514,18 @@ def run_polla_pipeline(
             f"{match_name:<35} {score_str:>8} {exp_pts:>8.2f} "
             f"{mp_str:>10} {mp_prob*100:>5.1f}%{differs}"
         )
-        # Per-source breakdown
+        # Per-source breakdown: show win probabilities (not raw odds)
         for bm_id, odds in source_odds.items():
             bm_name = _ADAPTER_DISPLAY_NAMES.get(bm_id, bm_id)
-            print(f"    └─ {bm_name:<18} H={odds[0]:.2f}  D={odds[1]:.2f}  A={odds[2]:.2f}")
+            # Convert odds to implied probabilities and normalize
+            imp_h = 1.0 / odds[0]
+            imp_d = 1.0 / odds[1]
+            imp_a = 1.0 / odds[2]
+            total = imp_h + imp_d + imp_a
+            prob_h = imp_h / total * 100
+            prob_d = imp_d / total * 100
+            prob_a = imp_a / total * 100
+            print(f"    └─ {bm_name:<18} Home {prob_h:.0f}%  Draw {prob_d:.0f}%  Away {prob_a:.0f}%")
 
     print(f"{'-'*72}")
     print("  * = optimal differs from most probable score")
