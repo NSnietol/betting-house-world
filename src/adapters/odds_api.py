@@ -202,12 +202,15 @@ class OddsAPIAdapter(OddsAdapter):
     ) -> list[ScrapedMatch]:
         """Parse h2h market events into ScrapedMatch objects.
 
+        Averages odds across ALL bookmakers for each event to produce
+        one ScrapedMatch per match (not one per bookmaker).
+
         Args:
             events: Raw event dicts from the API.
             date: Optional date filter (YYYY-MM-DD).
 
         Returns:
-            List of ScrapedMatch with market_type='1x2'.
+            List of ScrapedMatch with market_type='1x2' (one per event).
         """
         matches: list[ScrapedMatch] = []
         for event in events:
@@ -215,25 +218,52 @@ class OddsAPIAdapter(OddsAdapter):
             if date and not self._matches_date(event_time, date):
                 continue
 
+            home_team = event.get("home_team", "")
+            away_team = event.get("away_team", "")
+
+            # Collect odds across all bookmakers for this event
+            home_odds_all: list[float] = []
+            draw_odds_all: list[float] = []
+            away_odds_all: list[float] = []
+
             for bookmaker in event.get("bookmakers", []):
                 for market in bookmaker.get("markets", []):
                     if market.get("key") != "h2h":
                         continue
-                    outcomes = self._extract_h2h_outcomes(
-                        market.get("outcomes", []),
-                        home_team=event.get("home_team", ""),
-                        away_team=event.get("away_team", ""),
-                    )
-                    if outcomes:
-                        matches.append(
-                            ScrapedMatch(
-                                home_team=event.get("home_team", ""),
-                                away_team=event.get("away_team", ""),
-                                event_timestamp=event_time,
-                                market_type="1x2",
-                                outcomes=outcomes,
-                            )
-                        )
+                    for outcome in market.get("outcomes", []):
+                        name = outcome.get("name", "")
+                        price = outcome.get("price")
+                        if price is None:
+                            continue
+                        if name.lower() == "draw" or name.lower() == "x":
+                            draw_odds_all.append(float(price))
+                        elif name == home_team:
+                            home_odds_all.append(float(price))
+                        elif name == away_team:
+                            away_odds_all.append(float(price))
+
+            if not home_odds_all or not draw_odds_all or not away_odds_all:
+                continue
+
+            # Average across all bookmakers
+            avg_home = sum(home_odds_all) / len(home_odds_all)
+            avg_draw = sum(draw_odds_all) / len(draw_odds_all)
+            avg_away = sum(away_odds_all) / len(away_odds_all)
+
+            outcomes = [
+                MarketOutcome(name="Home", odds=avg_home),
+                MarketOutcome(name="Draw", odds=avg_draw),
+                MarketOutcome(name="Away", odds=avg_away),
+            ]
+            matches.append(
+                ScrapedMatch(
+                    home_team=home_team,
+                    away_team=away_team,
+                    event_timestamp=event_time,
+                    market_type="1x2",
+                    outcomes=outcomes,
+                )
+            )
         return matches
 
     def _parse_totals_events(
@@ -254,23 +284,47 @@ class OddsAPIAdapter(OddsAdapter):
             if date and not self._matches_date(event_time, date):
                 continue
 
+            home_team = event.get("home_team", "")
+            away_team = event.get("away_team", "")
+
+            # Collect O/U 2.5 odds across all bookmakers
+            over_odds_all: list[float] = []
+            under_odds_all: list[float] = []
+
             for bookmaker in event.get("bookmakers", []):
                 for market in bookmaker.get("markets", []):
                     if market.get("key") != "totals":
                         continue
-                    outcomes = self._extract_totals_outcomes(
-                        market.get("outcomes", [])
-                    )
-                    if outcomes:
-                        matches.append(
-                            ScrapedMatch(
-                                home_team=event.get("home_team", ""),
-                                away_team=event.get("away_team", ""),
-                                event_timestamp=event_time,
-                                market_type="over_under",
-                                outcomes=outcomes,
-                            )
-                        )
+                    for outcome in market.get("outcomes", []):
+                        name = outcome.get("name", "")
+                        price = outcome.get("price")
+                        point = outcome.get("point")
+                        if price is None or point != 2.5:
+                            continue
+                        if name == "Over":
+                            over_odds_all.append(float(price))
+                        elif name == "Under":
+                            under_odds_all.append(float(price))
+
+            if not over_odds_all or not under_odds_all:
+                continue
+
+            avg_over = sum(over_odds_all) / len(over_odds_all)
+            avg_under = sum(under_odds_all) / len(under_odds_all)
+
+            outcomes = [
+                MarketOutcome(name="Over", odds=avg_over, point=2.5),
+                MarketOutcome(name="Under", odds=avg_under, point=2.5),
+            ]
+            matches.append(
+                ScrapedMatch(
+                    home_team=home_team,
+                    away_team=away_team,
+                    event_timestamp=event_time,
+                    market_type="over_under",
+                    outcomes=outcomes,
+                )
+            )
         return matches
 
     @staticmethod

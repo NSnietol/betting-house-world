@@ -647,9 +647,14 @@ def main(argv: list[str] | None = None) -> None:
         excluded_bookmakers=excluded,
     )
 
+    # For --polla mode: accept single-source events (Odds API already aggregates 24 bookmakers)
+    if args.polla:
+        extractor.MIN_BOOKMAKERS = 1
+
     # Determine date (default to today if not provided and no round)
+    # For --polla mode: fetch ALL available matches (no date filter)
     extraction_date = args.date
-    if extraction_date is None and args.round is None:
+    if extraction_date is None and args.round is None and not args.polla:
         extraction_date = date_type.today().isoformat()
 
     # Extract odds
