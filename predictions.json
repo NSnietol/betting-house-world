@@ -1,0 +1,32 @@
+[
+  {
+    "match": "Mexico - South Africa",
+    "home": 1,
+    "away": 0
+  },
+  {
+    "match": "South Korea - Czech Republic",
+    "home": 0,
+    "away": 0
+  },
+  {
+    "match": "Canada - Bosnia & Herzegovina",
+    "home": 1,
+    "away": 0
+  },
+  {
+    "match": "USA - Paraguay",
+    "home": 1,
+    "away": 0
+  },
+  {
+    "match": "Qatar - Switzerland",
+    "home": 0,
+    "away": 1
+  },
+  {
+    "match": "Brazil - Morocco",
+    "home": 1,
+    "away": 0
+  }
+]
