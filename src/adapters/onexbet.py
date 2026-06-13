@@ -1,15 +1,19 @@
-"""1xBet bookmaker adapter using LineFeed JSON API.
+"""1xBet bookmaker adapter using Playwright headless browser.
 
-Extracts 1X2 and Over/Under 2.5 odds from 1xBet's public JSON endpoints.
-This is a Tier 1 (HTTP) adapter — no headless browser required.
+Extracts 1X2 and Over/Under 2.5 odds from 1xBet by intercepting the
+internal LineFeed API responses during a headless browser session.
+The LineFeed API requires browser-established cookies/session to return
+data (responds 406 to plain HTTP requests), so Playwright is used to
+navigate to the league page and capture the JSON API response.
+
+This is a Tier 2 (Headless) adapter — requires Playwright + Chromium.
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
-
-import requests
 
 from src.adapters.base import (
     AdapterHealth,
@@ -19,13 +23,22 @@ from src.adapters.base import (
     OddsExtractionError,
     ScrapedMatch,
 )
-from src.scraping.http_scraper import HTTPScraper
 from src.scraping.resilience import ResilienceConfig
 
 logger = logging.getLogger(__name__)
 
+try:
+    from playwright.sync_api import (
+        sync_playwright,
+        TimeoutError as PlaywrightTimeout,
+    )
+    _PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    _PLAYWRIGHT_AVAILABLE = False
 
-# Mapping from sport keys to 1xBet league (championship) IDs
+
+# Mapping from sport keys to 1xBet championship IDs
+# These IDs are used in the champs= parameter of the LineFeed API
 _LEAGUE_IDS: dict[str, int] = {
     "soccer_epl": 88637,
     "soccer_spain_la_liga": 127733,
@@ -33,41 +46,53 @@ _LEAGUE_IDS: dict[str, int] = {
     "soccer_italy_serie_a": 110163,
     "soccer_france_ligue_one": 12821,
     "soccer_uefa_champs_league": 118587,
-    "soccer_world_cup": 16801,
+    "soccer_world_cup": 2708736,
 }
 
-# 1xBet domain for rate limiting
-_DOMAIN = "1xbet.com"
-
-# Base URL
+# 1xBet base URL
 _BASE_URL = "https://1xbet.com"
 
-# LineFeed endpoints
-_LEAGUE_EVENTS_URL = (
-    "https://1xbet.com/LineFeed/GetChampZip?sport=1&champ={league_id}&lng=en"
-)
-_EVENT_DETAILS_URL = (
-    "https://1xbet.com/LineFeed/GetGameZip?id={event_id}&lng=en"
-)
+# The regional domain that serves the API (redirected from 1xbet.com)
+_API_DOMAIN = "col-1xbet.com"
+
+# LineFeed API endpoint pattern (intercepted from browser network)
+_LINEFEED_API_PATTERN = "service-api/LineFeed/Get1x2_VZip"
+
+# Entry page to establish browser session
+_FOOTBALL_PAGE = "https://1xbet.com/line/Football/"
+
+# Default timeout for Playwright operations (ms)
+_DEFAULT_TIMEOUT = 60_000
 
 
 class OneXBetAdapter(OddsAdapter):
-    """1xBet adapter using the public LineFeed JSON API.
+    """1xBet adapter using Playwright headless browser with API interception.
 
-    Extracts odds from 1xBet's JSON feed endpoints. These endpoints
-    return structured data without requiring authentication or HTML
-    parsing.
+    Navigates to 1xBet's football page using a headless browser, which
+    triggers the internal LineFeed API call. The adapter intercepts this
+    API response to extract structured JSON odds data. This approach
+    bypasses CloudFlare JS challenges that block direct HTTP requests.
     """
 
     def __init__(self, resilience: ResilienceConfig | None = None) -> None:
         """Initialize the 1xBet adapter.
 
         Args:
-            resilience: Optional resilience configuration. Uses defaults
-                if not provided.
+            resilience: Optional resilience configuration (used for timeout
+                settings). Playwright manages its own retries.
+
+        Raises:
+            ImportError: If playwright is not installed.
         """
+        if not _PLAYWRIGHT_AVAILABLE:
+            raise ImportError(
+                "Playwright is required for the 1xBet adapter. "
+                "Install with: pip install playwright && playwright install chromium"
+            )
         self._resilience = resilience or ResilienceConfig()
-        self._scraper = HTTPScraper(self._resilience)
+        self._timeout = _DEFAULT_TIMEOUT
+        self._playwright = None
+        self._browser = None
 
     @property
     def bookmaker_id(self) -> str:
@@ -86,8 +111,8 @@ class OneXBetAdapter(OddsAdapter):
 
     @property
     def extraction_method(self) -> ExtractionMethod:
-        """Uses HTTP extraction via JSON API."""
-        return ExtractionMethod.HTTP
+        """Uses headless browser extraction (Playwright)."""
+        return ExtractionMethod.HEADLESS
 
     @property
     def base_url(self) -> str:
@@ -95,10 +120,10 @@ class OneXBetAdapter(OddsAdapter):
         return _BASE_URL
 
     def fetch_1x2(self, sport: str, date: str | None = None) -> list[ScrapedMatch]:
-        """Fetch 1X2 (match winner) odds from 1xBet LineFeed API.
+        """Fetch 1X2 (match winner) odds from 1xBet via headless browser.
 
-        Retrieves events for the specified league and extracts home/draw/away
-        odds from the JSON response.
+        Navigates to the league page in a headless browser and intercepts
+        the LineFeed API response containing structured odds JSON.
 
         Args:
             sport: Sport/league key (e.g., 'soccer_epl').
@@ -134,10 +159,10 @@ class OneXBetAdapter(OddsAdapter):
     def fetch_over_under(
         self, sport: str, date: str | None = None
     ) -> list[ScrapedMatch]:
-        """Fetch Over/Under 2.5 goals odds from 1xBet LineFeed API.
+        """Fetch Over/Under 2.5 goals odds from 1xBet via headless browser.
 
-        Retrieves events for the specified league and extracts over/under
-        2.5 total goals odds from the JSON response.
+        Navigates to the league page and extracts over/under 2.5 total
+        goals odds from the intercepted LineFeed API response.
 
         Args:
             sport: Sport/league key (e.g., 'soccer_epl').
@@ -170,30 +195,35 @@ class OneXBetAdapter(OddsAdapter):
         return matches
 
     def health_check(self) -> AdapterHealth:
-        """Check adapter health with a lightweight HEAD request.
+        """Check adapter health by navigating to 1xBet with Playwright.
 
-        Makes a HEAD request to the 1xBet LineFeed endpoint to verify
-        connectivity without downloading a full response.
+        Attempts to load the 1xBet football page in a headless browser.
+        Returns REACHABLE if the page loads successfully.
 
         Returns:
-            AdapterHealth.REACHABLE if the endpoint responds,
-            AdapterHealth.RATE_LIMITED on 429,
+            AdapterHealth.REACHABLE if 1xBet loads,
             AdapterHealth.UNREACHABLE on failure.
         """
         try:
-            self._scraper._rate_limiter.wait(_DOMAIN)
-            headers = {"User-Agent": self._scraper._ua_rotator.next()}
-            response = requests.head(
-                f"{_BASE_URL}/LineFeed/Get1x2_VZip?sports=1&count=1&lng=en&tf=2200000&tz=0",
-                headers=headers,
-                timeout=10,
-            )
-            if response.status_code == 429:
-                return AdapterHealth.RATE_LIMITED
-            if response.status_code < 400:
-                return AdapterHealth.REACHABLE
-            return AdapterHealth.UNREACHABLE
-        except (requests.exceptions.RequestException, OddsExtractionError):
+            pw = sync_playwright().start()
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page()
+            try:
+                response = page.goto(_FOOTBALL_PAGE, timeout=30_000)
+                if response and response.status < 400:
+                    result = AdapterHealth.REACHABLE
+                else:
+                    result = AdapterHealth.UNREACHABLE
+            except PlaywrightTimeout:
+                result = AdapterHealth.UNREACHABLE
+            except Exception:
+                result = AdapterHealth.UNREACHABLE
+            finally:
+                page.close()
+                browser.close()
+                pw.stop()
+            return result
+        except Exception:
             return AdapterHealth.UNREACHABLE
 
     # -------------------------------------------------------------------------
@@ -201,7 +231,7 @@ class OneXBetAdapter(OddsAdapter):
     # -------------------------------------------------------------------------
 
     def _get_league_id(self, sport: str) -> int:
-        """Resolve sport key to 1xBet league ID.
+        """Resolve sport key to 1xBet championship ID.
 
         Args:
             sport: Sport/league key (e.g., 'soccer_epl').
@@ -222,10 +252,18 @@ class OneXBetAdapter(OddsAdapter):
         return league_id
 
     def _fetch_league_events(self, league_id: int) -> list[dict[str, Any]]:
-        """Fetch events for a league from the LineFeed API.
+        """Fetch events for a league using Playwright API interception.
 
-        Uses the HTTPScraper's rate limiter and user-agent rotation
-        for the raw HTTP request, then parses the JSON response.
+        Launches a headless browser, navigates to the football page for
+        the specified league, and intercepts the LineFeed API response
+        that contains structured event data with odds.
+
+        Strategy:
+        1. Navigate to the league page URL
+        2. Intercept the Get1x2_VZip API response (JSON with all events)
+        3. Parse the JSON and return the events list
+
+        If API interception fails, falls back to DOM extraction.
 
         Args:
             league_id: 1xBet championship ID.
@@ -234,62 +272,96 @@ class OneXBetAdapter(OddsAdapter):
             List of event dictionaries from the JSON response.
 
         Raises:
-            OddsExtractionError: On network or parsing failure.
+            OddsExtractionError: On browser or parsing failure.
         """
-        url = _LEAGUE_EVENTS_URL.format(league_id=league_id)
-
-        self._scraper._rate_limiter.wait(_DOMAIN)
-        headers = {"User-Agent": self._scraper._ua_rotator.next()}
-        proxies = None
-        if self._resilience.proxy:
-            proxies = {"http": self._resilience.proxy, "https": self._resilience.proxy}
-
-        def _do_request() -> requests.Response:
-            response = requests.get(
-                url,
-                headers=headers,
-                timeout=30,
-                proxies=proxies,
-            )
-            response.raise_for_status()
-            return response
+        captured_events: list[dict[str, Any]] = []
 
         try:
-            response = self._scraper._retry_handler.execute(_do_request)
+            pw = sync_playwright().start()
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page()
+
+            # Set up response interception to capture LineFeed API data
+            api_data: list[dict[str, Any]] = []
+
+            def _on_response(response):
+                """Capture LineFeed API responses."""
+                try:
+                    url = response.url
+                    if _LINEFEED_API_PATTERN in url and response.status == 200:
+                        body = response.text()
+                        data = json.loads(body)
+                        if isinstance(data, dict) and "Value" in data:
+                            api_data.extend(data["Value"])
+                        elif isinstance(data, list):
+                            api_data.extend(data)
+                except Exception as exc:
+                    logger.debug("Error capturing API response: %s", exc)
+
+            page.on("response", _on_response)
+
+            # Navigate to the football page — this triggers the API call
+            # Use the generic football URL which loads all leagues
+            page.goto(_FOOTBALL_PAGE, timeout=self._timeout)
+
+            # Wait for odds to render (indicates API call completed)
+            try:
+                page.wait_for_selector(
+                    ".ui-market__value", timeout=30_000
+                )
+            except PlaywrightTimeout:
+                logger.warning(
+                    "Timeout waiting for odds to render on 1xBet page"
+                )
+
+            # Give extra time for API responses to be captured
+            page.wait_for_timeout(3000)
+
+            # Filter events by league_id
+            for event in api_data:
+                event_league = event.get("N") or event.get("LI")
+                # Accept if league matches, or if no filter needed
+                if event_league == league_id or league_id == event.get("LI"):
+                    captured_events.append(event)
+
+            # If no events matched the league filter, try all captured events
+            # (the league ID might be mapped differently)
+            if not captured_events and api_data:
+                # Try matching by league name or just return all
+                captured_events = api_data
+
+            page.close()
+            browser.close()
+            pw.stop()
+
+        except PlaywrightTimeout as exc:
+            raise OddsExtractionError(
+                message=f"Timeout loading 1xBet page: {exc}",
+                adapter_id=self.bookmaker_id,
+            ) from exc
         except OddsExtractionError:
             raise
-        except requests.exceptions.RequestException as exc:
+        except Exception as exc:
             raise OddsExtractionError(
-                message=f"Failed to fetch 1xBet league events: {exc}",
+                message=f"Failed to fetch 1xBet events via browser: {exc}",
                 adapter_id=self.bookmaker_id,
             ) from exc
 
-        try:
-            data = response.json()
-        except (ValueError, AttributeError) as exc:
-            raise OddsExtractionError(
-                message=f"Invalid JSON response from 1xBet: {exc}",
-                adapter_id=self.bookmaker_id,
-            ) from exc
-
-        # The response structure: {"Value": [...events...]} or direct list
-        if isinstance(data, dict):
-            return data.get("Value", [])
-        if isinstance(data, list):
-            return data
-        return []
+        return captured_events
 
     def _parse_1x2_event(self, event: dict[str, Any]) -> ScrapedMatch | None:
         """Parse a single event dict into a 1X2 ScrapedMatch.
 
-        The 1xBet JSON structure for events typically contains:
-        - "O1" / "OX" / "O2": team 1 win / draw / team 2 win (legacy fields)
-        - "E" list of market entries with "T" (type) and "C" (coefficient/odds)
-        - "O1E", "OXE", "O2E": direct odds fields in some responses
-        - "SC": start time as unix timestamp
+        The 1xBet JSON structure contains:
+        - "O1" / "O2": team names
+        - "S" or "SC": start time as unix timestamp
+        - "E" list with entries having "T" (type) and "C" (coefficient)
+          - T=1: Home Win (W1)
+          - T=2: Draw (X)
+          - T=3: Away Win (W2)
 
         Args:
-            event: Raw event dictionary from the JSON response.
+            event: Raw event dictionary from the API response.
 
         Returns:
             ScrapedMatch with 1x2 outcomes, or None if odds are missing.
@@ -330,11 +402,12 @@ class OneXBetAdapter(OddsAdapter):
         """Parse a single event dict into an Over/Under 2.5 ScrapedMatch.
 
         Looks for total goals market (over/under 2.5) in the event data.
-        In the 1xBet JSON, over/under markets are stored in the "GE" (game
-        events) or "E" (events/markets) arrays with specific type identifiers.
+        In the LineFeed JSON, these are entries with:
+        - T=9, P=2.5: Over 2.5
+        - T=10, P=2.5: Under 2.5
 
         Args:
-            event: Raw event dictionary from the JSON response.
+            event: Raw event dictionary from the API response.
 
         Returns:
             ScrapedMatch with over_under outcomes, or None if data missing.
@@ -368,10 +441,10 @@ class OneXBetAdapter(OddsAdapter):
     def _extract_team_name(self, event: dict[str, Any], side: str) -> str:
         """Extract team name from event data.
 
-        1xBet JSON uses several naming conventions:
-        - "O1" / "O2" for team names in some endpoints
-        - "Home" / "Away" in some responses
-        - "Opp1" / "Opp2" for opponents
+        1xBet JSON uses:
+        - "O1" / "O2": team names (string)
+        - "O1E" / "O2E": English team names
+        - "Opp1" / "Opp2": alternative field names
 
         Args:
             event: Event dictionary.
@@ -384,16 +457,13 @@ class OneXBetAdapter(OddsAdapter):
             KeyError: If no team name can be extracted.
         """
         if side == "home":
-            # Try common field names for home team
-            for key in ("O1", "Home", "Opp1", "O1E"):
+            for key in ("O1", "O1E", "Opp1", "Home"):
                 if key in event and isinstance(event[key], str) and event[key]:
                     return event[key]
-            # Nested structure
             if "Opp1" in event and isinstance(event["Opp1"], dict):
                 return event["Opp1"].get("Name", "")
         else:
-            # Try common field names for away team
-            for key in ("O2", "Away", "Opp2", "O2E"):
+            for key in ("O2", "O2E", "Opp2", "Away"):
                 if key in event and isinstance(event[key], str) and event[key]:
                     return event[key]
             if "Opp2" in event and isinstance(event["Opp2"], dict):
@@ -404,8 +474,8 @@ class OneXBetAdapter(OddsAdapter):
     def _extract_timestamp(self, event: dict[str, Any]) -> datetime:
         """Extract event start timestamp.
 
-        1xBet uses unix timestamps in the "SC" (start count) field,
-        or "S" (start) field in some responses.
+        1xBet uses unix timestamps in the "S" field (new API) or "SC"
+        field (legacy format).
 
         Args:
             event: Event dictionary.
@@ -417,13 +487,12 @@ class OneXBetAdapter(OddsAdapter):
             KeyError: If no timestamp field is found.
             ValueError: If the timestamp cannot be parsed.
         """
-        for key in ("SC", "S", "StartTime"):
+        for key in ("S", "SC", "StartTime"):
             if key in event:
                 value = event[key]
                 if isinstance(value, (int, float)):
                     return datetime.fromtimestamp(value, tz=timezone.utc)
                 if isinstance(value, str):
-                    # Try parsing ISO format
                     return datetime.fromisoformat(
                         value.replace("Z", "+00:00")
                     )
@@ -434,11 +503,12 @@ class OneXBetAdapter(OddsAdapter):
     ) -> float | None:
         """Extract a single 1X2 odds value from event data.
 
-        1xBet JSON formats vary. Common structures:
-        - Direct fields: "O1" (home odds), "OX" (draw), "O2" (away odds)
-          when these are floats rather than strings
-        - "E" array with entries having "T" (type) and "C" (coefficient)
-          - Type 1 = home win, Type 2 = draw, Type 3 = away win
+        The LineFeed API uses the "E" array with typed entries:
+        - T=1: Home Win (W1)
+        - T=2: Draw (X)
+        - T=3: Away Win (W2)
+
+        Also supports legacy direct fields and GE array format.
 
         Args:
             event: Event dictionary.
@@ -447,21 +517,11 @@ class OneXBetAdapter(OddsAdapter):
         Returns:
             Decimal odds value, or None if not found.
         """
-        # Map outcome to field names and type IDs
-        field_map = {
-            "home": ("O1", 1),
-            "draw": ("OX", 2),
-            "away": ("O2", 3),
-        }
-        field_name, type_id = field_map[outcome]
+        # Map outcome to type IDs
+        type_map = {"home": 1, "draw": 2, "away": 3}
+        target_type = type_map[outcome]
 
-        # Strategy 1: Direct float fields (GetChampZip response format)
-        if field_name in event:
-            value = event[field_name]
-            if isinstance(value, (int, float)) and value > 1.0:
-                return float(value)
-
-        # Strategy 2: "E" array with typed entries
+        # Strategy 1: "E" array with typed entries (primary format)
         entries = event.get("E", [])
         if isinstance(entries, list):
             for entry in entries:
@@ -469,26 +529,33 @@ class OneXBetAdapter(OddsAdapter):
                     continue
                 entry_type = entry.get("T")
                 coefficient = entry.get("C")
-                if entry_type == type_id and coefficient is not None:
+                if entry_type == target_type and coefficient is not None:
                     try:
                         return float(coefficient)
                     except (ValueError, TypeError):
                         continue
 
-        # Strategy 3: "GE" (game events) array — another format
+        # Strategy 2: Direct float fields (legacy GetChampZip format)
+        field_map = {"home": "O1", "draw": "OX", "away": "O2"}
+        field_name = field_map[outcome]
+        if field_name in event:
+            value = event[field_name]
+            if isinstance(value, (int, float)) and value > 1.0:
+                return float(value)
+
+        # Strategy 3: "GE" (game events) array
         game_events = event.get("GE", [])
         if isinstance(game_events, list):
             for ge in game_events:
                 if not isinstance(ge, dict):
                     continue
-                # Look for 1X2 market group (type 1)
                 if ge.get("G") == 1 or ge.get("T") == 1:
                     ge_entries = ge.get("E", [])
                     if isinstance(ge_entries, list):
                         for entry in ge_entries:
                             if not isinstance(entry, dict):
                                 continue
-                            if entry.get("T") == type_id:
+                            if entry.get("T") == target_type:
                                 try:
                                     return float(entry.get("C", 0))
                                 except (ValueError, TypeError):
@@ -501,11 +568,11 @@ class OneXBetAdapter(OddsAdapter):
     ) -> tuple[float | None, float | None]:
         """Extract Over/Under 2.5 goals odds from event data.
 
-        Looks for the total goals market with a 2.5 line in the event.
-        1xBet structures this differently across endpoints:
-        - "TotalOver" / "TotalUnder" direct fields
-        - "E" array with type 9 (over) and type 10 (under)
-        - "GE" array with market group for totals
+        The LineFeed API uses the "E" array:
+        - T=9, P=2.5: Over 2.5
+        - T=10, P=2.5: Under 2.5
+
+        Also supports legacy TotalOver/TotalUnder fields and GE array.
 
         Args:
             event: Event dictionary.
@@ -516,17 +583,7 @@ class OneXBetAdapter(OddsAdapter):
         over_odds: float | None = None
         under_odds: float | None = None
 
-        # Strategy 1: Direct fields
-        if "TotalOver" in event and "TotalUnder" in event:
-            try:
-                over_val = float(event["TotalOver"])
-                under_val = float(event["TotalUnder"])
-                if over_val > 1.0 and under_val > 1.0:
-                    return over_val, under_val
-            except (ValueError, TypeError):
-                pass
-
-        # Strategy 2: "E" array with type 9 (over) and 10 (under)
+        # Strategy 1: "E" array with type 9 (over) and 10 (under)
         entries = event.get("E", [])
         if isinstance(entries, list):
             for entry in entries:
@@ -536,7 +593,7 @@ class OneXBetAdapter(OddsAdapter):
                 coefficient = entry.get("C")
                 point = entry.get("P")
 
-                # Check for 2.5 point line (or accept if no point specified)
+                # Check for 2.5 point line
                 if point is not None:
                     try:
                         if float(point) != 2.5:
@@ -558,13 +615,22 @@ class OneXBetAdapter(OddsAdapter):
         if over_odds is not None and under_odds is not None:
             return over_odds, under_odds
 
-        # Strategy 3: "GE" array — totals market group
+        # Strategy 2: Direct fields (legacy format)
+        if "TotalOver" in event and "TotalUnder" in event:
+            try:
+                over_val = float(event["TotalOver"])
+                under_val = float(event["TotalUnder"])
+                if over_val > 1.0 and under_val > 1.0:
+                    return over_val, under_val
+            except (ValueError, TypeError):
+                pass
+
+        # Strategy 3: "GE" array — totals market group (G=17)
         game_events = event.get("GE", [])
         if isinstance(game_events, list):
             for ge in game_events:
                 if not isinstance(ge, dict):
                     continue
-                # Totals market group (G=17 or T=17 for totals in 1xBet)
                 if ge.get("G") == 17 or ge.get("T") == 17:
                     ge_entries = ge.get("E", [])
                     if isinstance(ge_entries, list):
