@@ -12,9 +12,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+headless = [
+    "playwright",
+]
 dev = [
     "hypothesis",
     "pytest",
+    "playwright",
 ]
 
 [project.scripts]
