@@ -96,9 +96,13 @@ def fill_page(page, predictions: list[dict]) -> tuple[int, list[dict]]:
             remaining.append(pred)
             continue
 
-        # Skip already filled
+        # Skip already filled (unless --force would be passed externally)
         if best["homeVal"] and best["awayVal"]:
-            continue
+            # Check if prediction differs from what's on the page
+            if str(pred["home"]) == best["homeVal"] and str(pred["away"]) == best["awayVal"]:
+                continue  # Already correct, skip
+            # Different value — overwrite it
+            pass
 
         home_el = page.locator(f"#{best['homeId']}")
         away_el = page.locator(f"#{best['awayId']}")
