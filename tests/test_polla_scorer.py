@@ -99,13 +99,13 @@ class TestScorePrediction:
         assert scorer.score_prediction(2, 0, 1, 0) == 7
 
     def test_only_home_goals_correct(self) -> None:
-        """Pred 1-2 (away win), actual 1-0 (home win): only home goals match."""
+        """Pred 1-2 (away win), actual 1-0 (home win): home goals + abs diff match."""
         scorer = PollaScorer(is_knockout=False)
         # result: away win vs home win -> 0
         # home: 1 == 1 -> 2
         # away: 2 != 0 -> 0
-        # diff: -1 != 1 -> 0
-        assert scorer.score_prediction(1, 2, 1, 0) == 2
+        # |diff|: |-1| == |1| -> 1 (absolute value per platform rules)
+        assert scorer.score_prediction(1, 2, 1, 0) == 3
 
     def test_draw_prediction_correct(self) -> None:
         """Pred 0-0, actual 2-2: draw correct + diff correct."""
@@ -190,15 +190,15 @@ class TestExpectedPoints:
 
         # Prediction: 1-0
         # If actual is 1-0 (prob 0.6): result(5) + home(2) + away(2) + diff(1) = 10
-        # If actual is 0-1 (prob 0.4): all wrong = 0
+        # If actual is 0-1 (prob 0.4): |diff| matches (|1|==|1|) = 1 pt
         ep_10 = scorer.expected_points(1, 0, matrix)
-        assert ep_10 == pytest.approx(0.6 * 10 + 0.4 * 0)
+        assert ep_10 == pytest.approx(0.6 * 10 + 0.4 * 1)
 
         # Prediction: 0-1
-        # If actual is 1-0 (prob 0.6): 0 pts
+        # If actual is 1-0 (prob 0.6): |diff| matches (|-1|==|1|) = 1 pt
         # If actual is 0-1 (prob 0.4): 10 pts
         ep_01 = scorer.expected_points(0, 1, matrix)
-        assert ep_01 == pytest.approx(0.6 * 0 + 0.4 * 10)
+        assert ep_01 == pytest.approx(0.6 * 1 + 0.4 * 10)
 
         # Prediction: 0-0 (draw)
         # If actual is 1-0 (prob 0.6): result wrong, home 0!=1, away 0==0 -> 2 pts
@@ -206,10 +206,10 @@ class TestExpectedPoints:
         ep_00 = scorer.expected_points(0, 0, matrix)
         assert ep_00 == pytest.approx(0.6 * 2 + 0.4 * 2)
 
-        # Best prediction should be 1-0 (6.0 > 4.0 > 2.0)
+        # Best prediction should be 1-0 (6.4 > 4.6 > 2.0)
         rec = scorer.recommend(matrix)
         assert rec.predicted_score == (1, 0)
-        assert rec.expected_points == pytest.approx(6.0)
+        assert rec.expected_points == pytest.approx(6.4)
 
 
 # ---------------------------------------------------------------------------

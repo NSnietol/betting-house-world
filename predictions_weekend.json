@@ -1,0 +1,57 @@
+[
+  {
+    "match": "Brazil - Morocco",
+    "home": 1,
+    "away": 0
+  },
+  {
+    "match": "Qatar - Switzerland",
+    "home": 0,
+    "away": 1
+  },
+  {
+    "match": "Haiti - Scotland",
+    "home": 0,
+    "away": 1
+  },
+  {
+    "match": "Australia - Turkey",
+    "home": 0,
+    "away": 1
+  },
+  {
+    "match": "Netherlands - Japan",
+    "home": 1,
+    "away": 0
+  },
+  {
+    "match": "Germany - Curaçao",
+    "home": 3,
+    "away": 0
+  },
+  {
+    "match": "Ivory Coast - Ecuador",
+    "home": 0,
+    "away": 1
+  },
+  {
+    "match": "Sweden - Tunisia",
+    "home": 1,
+    "away": 0
+  },
+  {
+    "match": "Spain - Cape Verde",
+    "home": 3,
+    "away": 0
+  },
+  {
+    "match": "Belgium - Egypt",
+    "home": 1,
+    "away": 0
+  },
+  {
+    "match": "Saudi Arabia - Uruguay",
+    "home": 0,
+    "away": 1
+  }
+]

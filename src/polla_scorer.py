@@ -160,8 +160,8 @@ class PollaScorer:
         if pred_a == actual_a:
             points += self.goals_points
 
-        # Correct goal difference
-        if (pred_h - pred_a) == (actual_h - actual_a):
+        # Correct goal difference (absolute value per platform rules)
+        if abs(pred_h - pred_a) == abs(actual_h - actual_a):
             points += self.diff_points
 
         return points
@@ -249,8 +249,8 @@ class PollaScorer:
                 if j == a_pred:
                     e_away_goals += prob * self.goals_points
 
-                # Correct goal difference
-                if (i - j) == pred_diff:
+                # Correct goal difference (absolute value per platform rules)
+                if abs(i - j) == abs(pred_diff):
                     e_diff += prob * self.diff_points
 
         total = e_result + e_home_goals + e_away_goals + e_diff
