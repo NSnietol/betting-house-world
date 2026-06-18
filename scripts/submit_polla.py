@@ -37,57 +37,63 @@ POOL_URL = (
 )
 
 # English → Spanish team name translation for golpredictor.com
-_NAME_MAP: dict[str, str] = {
-    "germany": "alemania",
-    "netherlands": "paises bajos",
-    "england": "inglaterra",
-    "spain": "espana",
-    "france": "francia",
-    "belgium": "belgica",
-    "switzerland": "suiza",
-    "sweden": "suecia",
-    "portugal": "portugal",
-    "argentina": "argentina",
-    "brazil": "brasil",
-    "usa": "estados unidos",
-    "south korea": "corea del sur",
-    "south africa": "sudafrica",
-    "saudi arabia": "arabia saudita",
-    "ivory coast": "costa de marfil",
-    "czech republic": "republica checa",
-    "new zealand": "nueva zelanda",
-    "bosnia & herzegovina": "bosnia-herzegovina",
-    "bosnia and herzegovina": "bosnia-herzegovina",
-    "dr congo": "rd congo",
-    "curacao": "curazao",
-    "curaçao": "curazao",
-    "cape verde": "cabo verde",
-    "iran": "iran",
-    "iraq": "irak",
-    "qatar": "catar",
-    "morocco": "marruecos",
-    "tunisia": "tunez",
-    "algeria": "argelia",
-    "egypt": "egipto",
-    "senegal": "senegal",
-    "jordan": "jordania",
-    "norway": "noruega",
-    "croatia": "croacia",
-    "turkey": "turquia",
-    "scotland": "escocia",
-    "haiti": "haiti",
-    "panama": "panama",
-    "japan": "japon",
-    "australia": "australia",
-    "paraguay": "paraguay",
-    "colombia": "colombia",
-    "uzbekistan": "uzbekistan",
-    "ghana": "ghana",
-    "austria": "austria",
-    "mexico": "mexico",
-    "canada": "canada",
-    "uruguay": "uruguay",
+# Each team has multiple aliases (English, Spanish, abbreviations, common variants)
+# to ensure fuzzy matching works regardless of source format.
+_TEAM_ALIASES: dict[str, list[str]] = {
+    "alemania": ["germany", "alemania", "deutschland", "ger"],
+    "paises bajos": ["netherlands", "paises bajos", "holanda", "holland", "ned", "paises"],
+    "inglaterra": ["england", "inglaterra", "eng"],
+    "espana": ["spain", "espana", "españa", "esp"],
+    "francia": ["france", "francia", "fra"],
+    "belgica": ["belgium", "belgica", "bélgica", "bel"],
+    "suiza": ["switzerland", "suiza", "sui", "schweiz"],
+    "suecia": ["sweden", "suecia", "swe"],
+    "portugal": ["portugal", "por"],
+    "argentina": ["argentina", "arg"],
+    "brasil": ["brazil", "brasil", "bra"],
+    "estados unidos": ["usa", "estados unidos", "united states", "us", "eeuu"],
+    "corea del sur": ["south korea", "corea del sur", "korea republic", "korea", "kor"],
+    "sudafrica": ["south africa", "sudafrica", "sudáfrica", "rsa"],
+    "arabia saudita": ["saudi arabia", "arabia saudita", "ksa", "saudi"],
+    "costa de marfil": ["ivory coast", "costa de marfil", "cote d'ivoire", "cote divoire", "civ"],
+    "republica checa": ["czech republic", "republica checa", "república checa", "czechia", "cze"],
+    "nueva zelanda": ["new zealand", "nueva zelanda", "nzl"],
+    "bosnia-herzegovina": ["bosnia & herzegovina", "bosnia and herzegovina", "bosnia-herzegovina", "bosnia", "bih"],
+    "rd congo": ["dr congo", "rd congo", "congo dr", "congo", "cod"],
+    "curazao": ["curacao", "curaçao", "curazao", "cuw"],
+    "cabo verde": ["cape verde", "cabo verde", "cpv"],
+    "iran": ["iran", "irán", "iri"],
+    "irak": ["iraq", "irak", "irq"],
+    "catar": ["qatar", "catar", "qat"],
+    "marruecos": ["morocco", "marruecos", "mar"],
+    "tunez": ["tunisia", "tunez", "túnez", "tun"],
+    "argelia": ["algeria", "argelia", "alg"],
+    "egipto": ["egypt", "egipto", "egy"],
+    "senegal": ["senegal", "sen"],
+    "jordania": ["jordan", "jordania", "jor"],
+    "noruega": ["norway", "noruega", "nor"],
+    "croacia": ["croatia", "croacia", "cro"],
+    "turquia": ["turkey", "turquia", "turquía", "tur"],
+    "escocia": ["scotland", "escocia", "sco"],
+    "haiti": ["haiti", "haití", "hai"],
+    "panama": ["panama", "panamá", "pan"],
+    "japon": ["japan", "japon", "japón", "jpn"],
+    "australia": ["australia", "aus"],
+    "paraguay": ["paraguay", "par"],
+    "colombia": ["colombia", "col"],
+    "uzbekistan": ["uzbekistan", "uzbekistán", "uzb"],
+    "ghana": ["ghana", "gha"],
+    "austria": ["austria", "aut"],
+    "mexico": ["mexico", "méxico", "mex"],
+    "canada": ["canada", "canadá", "can"],
+    "uruguay": ["uruguay", "uru"],
 }
+
+# Build reverse lookup: any alias → canonical spanish name
+_ALIAS_TO_CANONICAL: dict[str, str] = {}
+for canonical, aliases in _TEAM_ALIASES.items():
+    for alias in aliases:
+        _ALIAS_TO_CANONICAL[alias.lower()] = canonical
 
 
 def normalize(name: str) -> str:
@@ -95,27 +101,60 @@ def normalize(name: str) -> str:
     return "".join(c for c in nfkd if not unicodedata.combining(c)).lower().strip()
 
 
+def _canonicalize_team(name: str) -> str:
+    """Convert any team name variant to its canonical Spanish form."""
+    norm = normalize(name)
+    # Direct lookup
+    if norm in _ALIAS_TO_CANONICAL:
+        return _ALIAS_TO_CANONICAL[norm]
+    # Try partial match (for cases like "Ivory d Coast" or typos)
+    for alias, canonical in _ALIAS_TO_CANONICAL.items():
+        if alias in norm or norm in alias:
+            return canonical
+    return norm
+
+
 def translate_to_spanish(name: str) -> str:
     """Translate English team names to Spanish equivalents for golpredictor."""
-    norm = normalize(name)
-    if norm in _NAME_MAP:
-        return _NAME_MAP[norm]
-    # Try splitting "Home - Away" and translating each part
-    parts = norm.replace(" - ", "|").replace(" vs ", "|").split("|")
-    translated = []
-    for part in parts:
-        part = part.strip()
-        translated.append(_NAME_MAP.get(part, part))
-    return " - ".join(translated)
+    return _canonicalize_team(name)
 
 
 def fuzzy_match(a: str, b: str) -> float:
-    """Jaccard similarity with English→Spanish translation."""
-    # Translate each team in the match name
-    parts = a.replace(" - ", "|").replace(" vs ", "|").split("|")
-    a_translated = " ".join(translate_to_spanish(p.strip()) for p in parts)
-    a_norm = normalize(a_translated).replace("-", " ")
-    b_norm = normalize(b).replace("-", " ")
+    """Match prediction name against page name using canonical team names.
+
+    Both sides are canonicalized to Spanish, then compared with Jaccard similarity.
+    This handles: English vs Spanish, accents, abbreviations, and variant spellings.
+    """
+    # Split into team names and canonicalize each
+    parts_a = a.replace(" - ", "|").replace(" vs ", "|").split("|")
+    parts_b = b.replace(" - ", "|").replace(" vs ", "|").split("|")
+
+    canon_a = set()
+    for part in parts_a:
+        canon_a.add(_canonicalize_team(part.strip()))
+
+    canon_b = set()
+    for part in parts_b:
+        canon_b.add(_canonicalize_team(part.strip()))
+
+    # If both teams match exactly, perfect score
+    if canon_a == canon_b:
+        return 1.0
+
+    # If at least one team matches, partial score
+    overlap = len(canon_a & canon_b)
+    total = len(canon_a | canon_b)
+
+    if total == 0:
+        return 0.0
+
+    # Boost: if both teams are in the intersection, it's a match
+    if overlap >= 2:
+        return 1.0
+
+    # Fallback: Jaccard on word tokens (handles edge cases)
+    a_norm = " ".join(sorted(canon_a))
+    b_norm = " ".join(sorted(canon_b))
     sa = set(a_norm.split())
     sb = set(b_norm.split())
     if not sa or not sb:
@@ -180,8 +219,9 @@ def fill_page(page, predictions: list[dict]) -> tuple[int, list[dict]]:
             if str(pred["home"]) == best["homeVal"] and str(pred["away"]) == best["awayVal"]:
                 print(f"    ✓ ALREADY CORRECT: {best['match']} = {pred['home']}-{pred['away']}")
                 continue
-            # Different value — overwrite
-            print(f"    ↻ UPDATING: {best['match']}: {best['homeVal']}-{best['awayVal']} → {pred['home']}-{pred['away']}")
+            # Never overwrite existing predictions — they were submitted intentionally
+            print(f"    🔒 SKIP (already has value): {best['match']}: {best['homeVal']}-{best['awayVal']} (wanted {pred['home']}-{pred['away']})")
+            continue
 
         home_el = page.locator(f"#{best['homeId']}")
         away_el = page.locator(f"#{best['awayId']}")
