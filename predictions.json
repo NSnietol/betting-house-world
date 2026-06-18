@@ -106,33 +106,33 @@
   },
   {
     "match": "Czech Republic - South Africa",
-    "home": 1,
-    "away": 0
+    "home": 2,
+    "away": 1
   },
   {
     "match": "Switzerland - Bosnia & Herzegovina",
-    "home": 1,
+    "home": 2,
     "away": 0
   },
   {
     "match": "Canada - Qatar",
-    "home": 2,
+    "home": 3,
     "away": 0
   },
   {
     "match": "Mexico - South Korea",
     "home": 1,
-    "away": 0
+    "away": 1
   },
   {
     "match": "USA - Australia",
-    "home": 1,
+    "home": 2,
     "away": 0
   },
   {
     "match": "Scotland - Morocco",
-    "home": 0,
-    "away": 1
+    "home": 1,
+    "away": 2
   },
   {
     "match": "Brazil - Haiti",
@@ -142,102 +142,102 @@
   {
     "match": "Turkey - Paraguay",
     "home": 1,
-    "away": 0
+    "away": 1
   },
   {
     "match": "Netherlands - Sweden",
-    "home": 1,
-    "away": 0
+    "home": 2,
+    "away": 1
   },
   {
     "match": "Germany - Ivory Coast",
-    "home": 1,
+    "home": 2,
     "away": 0
   },
   {
-    "match": "Ecuador - Cura\u00e7ao",
-    "home": 2,
+    "match": "Ecuador - Curaçao",
+    "home": 3,
     "away": 0
   },
   {
     "match": "Tunisia - Japan",
     "home": 0,
-    "away": 1
+    "away": 2
   },
   {
     "match": "Spain - Saudi Arabia",
-    "home": 2,
+    "home": 3,
     "away": 0
   },
   {
     "match": "Belgium - Iran",
-    "home": 1,
+    "home": 2,
     "away": 0
   },
   {
     "match": "Uruguay - Cape Verde",
-    "home": 1,
+    "home": 2,
     "away": 0
   },
   {
     "match": "New Zealand - Egypt",
-    "home": 0,
-    "away": 1
+    "home": 1,
+    "away": 2
   },
   {
     "match": "Argentina - Austria",
-    "home": 1,
+    "home": 2,
     "away": 0
   },
   {
     "match": "France - Iraq",
-    "home": 2,
+    "home": 3,
     "away": 0
   },
   {
     "match": "Norway - Senegal",
     "home": 1,
-    "away": 0
+    "away": 1
   },
   {
     "match": "Jordan - Algeria",
     "home": 0,
-    "away": 1
+    "away": 2
   },
   {
     "match": "Portugal - Uzbekistan",
-    "home": 2,
+    "home": 3,
     "away": 0
   },
   {
     "match": "England - Ghana",
-    "home": 2,
+    "home": 3,
     "away": 0
   },
   {
     "match": "Panama - Croatia",
     "home": 0,
-    "away": 1
+    "away": 2
   },
   {
     "match": "Colombia - DR Congo",
-    "home": 1,
+    "home": 2,
     "away": 0
   },
   {
     "match": "Bosnia & Herzegovina - Qatar",
-    "home": 1,
+    "home": 2,
     "away": 0
   },
   {
     "match": "Switzerland - Canada",
     "home": 1,
-    "away": 0
+    "away": 1
   },
   {
     "match": "Scotland - Brazil",
     "home": 0,
-    "away": 1
+    "away": 2
   },
   {
     "match": "Morocco - Haiti",
@@ -255,7 +255,7 @@
     "away": 1
   },
   {
-    "match": "Cura\u00e7ao - Ivory Coast",
+    "match": "Curaçao - Ivory Coast",
     "home": 0,
     "away": 2
   },

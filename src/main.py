@@ -182,6 +182,60 @@ def _compute_multi_line_ou_probs(
     return result
 
 
+def _tournament_adjusted_prediction(
+    p_home: float,
+    p_away: float,
+    ev_prediction: tuple[int, int],
+) -> tuple[int, int]:
+    """Apply tournament-calibrated goal adjustment to the EV-optimal prediction.
+
+    WC 2026 empirical data (20 matches, Jun 11-18):
+    - Average 3.1 goals/match (model predicts 1.3)
+    - 40% draws (model assigns 22%)
+    - Victories by 2+ goals: 56% of decisive results
+
+    The EV optimizer consistently picks minimum-goal predictions (1-0, 0-1)
+    because the trend component (5 pts) dominates. This adjustment increases
+    predicted goals to capture partial points (exact goals, goal difference)
+    that the pure EV model undervalues in a high-scoring tournament.
+
+    Rules:
+    - P(home) > 75%: predict 3-0 (dominant favorite, keep clean sheet)
+    - P(home) 60-75%: predict 2-0 (strong favorite)
+    - P(home) 50-60%: predict 2-1 (moderate favorite, expect a reply goal)
+    - P(home) 40-50%: predict 1-1 (balanced match, draws are 40%)
+    - P(away) 50-60%: predict 1-2 (moderate away favorite)
+    - P(away) 60-75%: predict 0-2 (strong away favorite)
+    - P(away) > 75%: predict 0-3 (dominant away favorite)
+
+    Args:
+        p_home: Probability of home win from devigged odds.
+        p_away: Probability of away win from devigged odds.
+        ev_prediction: Original EV-optimal prediction (for reference).
+
+    Returns:
+        Tournament-adjusted (home_goals, away_goals) prediction.
+    """
+    if p_home > 0.75:
+        return (3, 0)
+    elif p_home > 0.60:
+        return (2, 0)
+    elif p_home > 0.50:
+        return (2, 1)
+    elif p_home >= 0.40:
+        # Balanced match — predict draw (40% of WC 2026 results)
+        return (1, 1)
+    elif p_away > 0.75:
+        return (0, 3)
+    elif p_away > 0.60:
+        return (0, 2)
+    elif p_away > 0.50:
+        return (1, 2)
+    else:
+        # Very balanced, slight away lean
+        return (1, 1)
+
+
 def run_polla_pipeline(
     events: list[AggregatedEvent],
     knockout: bool = False,
@@ -286,14 +340,22 @@ def run_polla_pipeline(
         # Step 4: Polla optimization using corrected matrix + direct 1X2 probs
         rec = scorer.recommend(matrix, real_probs_1x2=avg_probs)
 
+        # Step 5: Tournament-calibrated goal adjustment
+        # WC 2026 data shows 3.1 goals/match avg and 40% draws.
+        # The EV optimizer always picks 1-0/0-1 (lowest goals) because
+        # trend (5 pts) dominates. Override based on P(home) thresholds
+        # to capture partial points (away goals, diff, draw trend).
+        p_home, p_draw, p_away = avg_probs
+        final_pred = _tournament_adjusted_prediction(p_home, p_away, rec.predicted_score)
+
         # Collect per-source odds for display
         source_odds: dict[str, tuple[float, float, float]] = event.bookmaker_odds_1x2
 
         predictions.append((
             f"{event.home_team} vs {event.away_team}",
-            f"{rec.predicted_score[0]}-{rec.predicted_score[1]}",
-            rec.predicted_score[0],
-            rec.predicted_score[1],
+            f"{final_pred[0]}-{final_pred[1]}",
+            final_pred[0],
+            final_pred[1],
             rec.expected_points,
             rec.max_probable_score,
             rec.max_probable_prob,
@@ -308,8 +370,8 @@ def run_polla_pipeline(
             + prediction_date,
             "home_team": event.home_team,
             "away_team": event.away_team,
-            "home_goals": rec.predicted_score[0],
-            "away_goals": rec.predicted_score[1],
+            "home_goals": final_pred[0],
+            "away_goals": final_pred[1],
             "lambda_home": lam,
             "mu_away": mu,
             "prediction_date": prediction_date,
