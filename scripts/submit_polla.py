@@ -141,25 +141,24 @@ def fuzzy_match(a: str, b: str) -> float:
     if canon_a == canon_b:
         return 1.0
 
-    # If at least one team matches, partial score
+    # Both teams must be present for a valid match
+    if len(canon_a) >= 2 and len(canon_b) >= 2:
+        if canon_a == canon_b:
+            return 1.0
+        # Check if both teams from prediction appear in the page match
+        overlap = len(canon_a & canon_b)
+        if overlap >= 2:
+            return 1.0
+        # Only ONE team matches — NOT a valid match (prevents Haiti-Scotland matching Brasil-Haiti)
+        if overlap <= 1:
+            return 0.0
+
+    # Single team entries (edge case)
     overlap = len(canon_a & canon_b)
     total = len(canon_a | canon_b)
-
     if total == 0:
         return 0.0
-
-    # Boost: if both teams are in the intersection, it's a match
-    if overlap >= 2:
-        return 1.0
-
-    # Fallback: Jaccard on word tokens (handles edge cases)
-    a_norm = " ".join(sorted(canon_a))
-    b_norm = " ".join(sorted(canon_b))
-    sa = set(a_norm.split())
-    sb = set(b_norm.split())
-    if not sa or not sb:
-        return 0.0
-    return len(sa & sb) / len(sa | sb)
+    return overlap / total
 
 
 def fill_page(page, predictions: list[dict]) -> tuple[int, list[dict]]:
@@ -219,9 +218,8 @@ def fill_page(page, predictions: list[dict]) -> tuple[int, list[dict]]:
             if str(pred["home"]) == best["homeVal"] and str(pred["away"]) == best["awayVal"]:
                 print(f"    ✓ ALREADY CORRECT: {best['match']} = {pred['home']}-{pred['away']}")
                 continue
-            # Never overwrite existing predictions — they were submitted intentionally
-            print(f"    🔒 SKIP (already has value): {best['match']}: {best['homeVal']}-{best['awayVal']} (wanted {pred['home']}-{pred['away']})")
-            continue
+            # Different value — update it (match hasn't been played yet if inputs are visible)
+            print(f"    ↻ UPDATING: {best['match']}: {best['homeVal']}-{best['awayVal']} → {pred['home']}-{pred['away']}")
 
         home_el = page.locator(f"#{best['homeId']}")
         away_el = page.locator(f"#{best['awayId']}")
