@@ -251,7 +251,21 @@ def main():
     with open(predictions_file) as f:
         predictions = json.load(f)
 
-    print(f"Loaded {len(predictions)} predictions from {predictions_file}")
+    # Filter: only send predictions for today or future matches
+    from datetime import date as date_type
+    today = date_type.today().isoformat()
+    future_predictions = [p for p in predictions if p.get("date") and p["date"] >= today]
+    past_skipped = len(predictions) - len(future_predictions)
+
+    if past_skipped > 0:
+        print(f"Skipped {past_skipped} past matches (before {today})")
+    print(f"Loaded {len(future_predictions)} future predictions from {predictions_file}")
+
+    if not future_predictions:
+        print("No future predictions to submit.")
+        sys.exit(0)
+
+    predictions = future_predictions
 
     user = os.environ.get("GOLPREDICTOR_USER")
     password = os.environ.get("GOLPREDICTOR_PASS")
