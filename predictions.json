@@ -295,110 +295,110 @@
   },
   {
     "match": "Czech Republic - Mexico",
-    "home": 0,
+    "home": 1,
     "away": 1,
     "date": "2026-06-25"
   },
   {
     "match": "South Africa - South Korea",
     "home": 0,
-    "away": 1,
+    "away": 2,
     "date": "2026-06-25"
   },
   {
     "match": "Curaçao - Ivory Coast",
     "home": 0,
-    "away": 2,
+    "away": 3,
     "date": "2026-06-25"
   },
   {
     "match": "Ecuador - Germany",
-    "home": 0,
-    "away": 1,
+    "home": 1,
+    "away": 2,
     "date": "2026-06-25"
   },
   {
     "match": "Japan - Sweden",
-    "home": 1,
-    "away": 0,
+    "home": 2,
+    "away": 1,
     "date": "2026-06-25"
   },
   {
     "match": "Tunisia - Netherlands",
     "home": 0,
-    "away": 1,
+    "away": 3,
     "date": "2026-06-25"
   },
   {
     "match": "Paraguay - Australia",
     "home": 1,
-    "away": 0,
+    "away": 1,
     "date": "2026-06-26"
   },
   {
     "match": "Turkey - USA",
-    "home": 0,
-    "away": 1,
+    "home": 1,
+    "away": 2,
     "date": "2026-06-26"
   },
   {
     "match": "Norway - France",
-    "home": 0,
-    "away": 1,
+    "home": 1,
+    "away": 2,
     "date": "2026-06-26"
   },
   {
     "match": "Senegal - Iraq",
-    "home": 1,
+    "home": 3,
     "away": 0,
     "date": "2026-06-26"
   },
   {
     "match": "Cape Verde - Saudi Arabia",
     "home": 1,
-    "away": 0,
+    "away": 1,
     "date": "2026-06-26"
   },
   {
     "match": "Uruguay - Spain",
     "home": 0,
-    "away": 1,
+    "away": 2,
     "date": "2026-06-26"
   },
   {
     "match": "New Zealand - Belgium",
     "home": 0,
-    "away": 2,
+    "away": 3,
     "date": "2026-06-26"
   },
   {
     "match": "Egypt - Iran",
     "home": 1,
-    "away": 0,
+    "away": 1,
     "date": "2026-06-26"
   },
   {
     "match": "Croatia - Ghana",
-    "home": 1,
-    "away": 0,
+    "home": 2,
+    "away": 1,
     "date": "2026-06-27"
   },
   {
     "match": "Panama - England",
     "home": 0,
-    "away": 2,
+    "away": 3,
     "date": "2026-06-27"
   },
   {
     "match": "Colombia - Portugal",
-    "home": 0,
-    "away": 1,
+    "home": 1,
+    "away": 2,
     "date": "2026-06-27"
   },
   {
     "match": "DR Congo - Uzbekistan",
-    "home": 1,
-    "away": 0,
+    "home": 2,
+    "away": 1,
     "date": "2026-06-27"
   },
   {
