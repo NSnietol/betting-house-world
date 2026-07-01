@@ -453,19 +453,19 @@
     "match": "USA - Bosnia & Herzegovina",
     "home": 2,
     "away": 0,
-    "date": "2026-06-29"
+    "date": "2026-07-01"
   },
   {
     "match": "Australia - Egypt",
     "home": 1,
     "away": 1,
-    "date": "2026-06-30"
+    "date": "2026-07-03"
   },
   {
     "match": "Argentina - Cape Verde",
     "home": 3,
     "away": 0,
-    "date": "2026-06-30"
+    "date": "2026-07-03"
   },
   {
     "match": "Mexico - Ecuador",
@@ -483,30 +483,54 @@
     "match": "Belgium - Senegal",
     "home": 1,
     "away": 1,
-    "date": "2026-06-29"
+    "date": "2026-07-01"
   },
   {
     "match": "Spain - Austria",
     "home": 2,
     "away": 0,
-    "date": "2026-06-29"
+    "date": "2026-07-02"
   },
   {
     "match": "Portugal - Croatia",
     "home": 2,
     "away": 1,
-    "date": "2026-06-30"
+    "date": "2026-07-02"
   },
   {
     "match": "Switzerland - Algeria",
     "home": 1,
     "away": 1,
-    "date": "2026-06-30"
+    "date": "2026-07-02"
   },
   {
     "match": "Colombia - Ghana",
     "home": 2,
     "away": 0,
-    "date": "2026-06-30"
+    "date": "2026-07-03"
+  },
+  {
+    "match": "Canada - Morocco",
+    "home": 1,
+    "away": 2,
+    "date": "2026-07-04"
+  },
+  {
+    "match": "Paraguay - France",
+    "home": 0,
+    "away": 3,
+    "date": "2026-07-04"
+  },
+  {
+    "match": "Brazil - Norway",
+    "home": 2,
+    "away": 1,
+    "date": "2026-07-05"
+  },
+  {
+    "match": "Mexico - England",
+    "home": 1,
+    "away": 1,
+    "date": "2026-07-05"
   }
 ]
